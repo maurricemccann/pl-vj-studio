@@ -504,10 +504,10 @@ function alignSelectedPoint() {
   pt[dst] = { x: pt.x - dx, y: pt.y - dy };
   render();
 }
-function updateHandleDrag(ribbon, point, side, mx, my) {
+function updateHandleDrag(ribbon, point, side, mx, my, dx, dy) {
   const r = active.ribbons[ribbon];
   const pt = r.points[point];
-  pt[side] = { x: mx / W, y: my / HGT };
+  pt[side] = { x: (mx + dx) / W, y: (my + dy) / HGT };
   lastHandleSide = side;
   if (pt.tied !== false) {
     const other = side === 'hOut' ? 'hIn' : 'hOut';
@@ -879,9 +879,10 @@ function render() {
     ['hOut', 'hIn'].forEach((k) => {
       if (!pt[k]) return;
       const hx = pt[k].x * W, hy = pt[k].y * HGT;
+      const isHandleDragging = [...drags.values()].some(d => d.type === 'handle' && d.point === selectedPoint.point && d.side === k);
       ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(hx, hy);
       ctx.strokeStyle = '#5f93a3'; ctx.lineWidth = 1; ctx.stroke();
-      ctx.fillStyle = '#5f93a3';
+      ctx.fillStyle = isHandleDragging ? '#ff4d4d' : '#5f93a3';
       ctx.fillRect(hx - 4, hy - 4, 8, 8);
     });
   }
@@ -915,7 +916,11 @@ canvas.addEventListener('pointerdown', (e) => {
 
   const handleSide = hitTestHandle(mx, my);
   if (handleSide) {
-    drags.set(e.pointerId, { type: 'handle', ribbon: selectedRibbon, point: selectedPoint.point, side: handleSide });
+    const gp = active.ribbons[selectedRibbon].points[selectedPoint.point][handleSide];
+    drags.set(e.pointerId, {
+      type: 'handle', ribbon: selectedRibbon, point: selectedPoint.point, side: handleSide,
+      dx: gp.x * W - mx, dy: gp.y * HGT - my,
+    });
     lastHandleSide = handleSide;
     canvas.setPointerCapture(e.pointerId);
     return;
@@ -924,7 +929,11 @@ canvas.addEventListener('pointerdown', (e) => {
   const pi = hitTestPoint(mx, my, selectedRibbon);
   if (pi >= 0) {
     selectedPoint = { ribbon: selectedRibbon, point: pi };
-    drags.set(e.pointerId, { type: 'point', ribbon: selectedRibbon, point: pi });
+    const gp = active.ribbons[selectedRibbon].points[pi];
+    drags.set(e.pointerId, {
+      type: 'point', ribbon: selectedRibbon, point: pi,
+      dx: gp.x * W - mx, dy: gp.y * HGT - my,
+    });
     canvas.setPointerCapture(e.pointerId);
     render();
     return;
@@ -948,13 +957,13 @@ canvas.addEventListener('pointermove', (e) => {
     return;
   }
   if (d && d.type === 'point') {
-    active.ribbons[d.ribbon].points[d.point].x = mx / W;
-    active.ribbons[d.ribbon].points[d.point].y = my / HGT;
+    active.ribbons[d.ribbon].points[d.point].x = (mx + d.dx) / W;
+    active.ribbons[d.ribbon].points[d.point].y = (my + d.dy) / HGT;
     render();
     return;
   }
   if (d && d.type === 'handle') {
-    updateHandleDrag(d.ribbon, d.point, d.side, mx, my);
+    updateHandleDrag(d.ribbon, d.point, d.side, mx, my, d.dx, d.dy);
     return;
   }
   if (!d) {
@@ -1037,6 +1046,7 @@ wirePad(document.getElementById('pad-gap-tremor'), 'gap', 'tremor', [0, 0.03], [
 const curveCanvas = document.getElementById('curve-graph');
 const curveCtx = curveCanvas.getContext('2d');
 let curveDrag = null;
+let curveDragDx = 0, curveDragDy = 0; // grab offset (screen px), set on pointerdown
 function drawCurveGraph() {
   const w = curveCanvas.width, h = curveCanvas.height;
   curveCtx.fillStyle = '#f5efe2';
@@ -1079,6 +1089,10 @@ curveCanvas.addEventListener('pointerdown', (e) => {
   const hit = curvePointAt(mx, my);
   if (hit >= 0) {
     curveDrag = hit;
+    const gp = adj.curvePoints[hit];
+    // screen-space grab offset; y is inverted (screen y = h - p.y*h)
+    curveDragDx = gp.x * curveCanvas.width - mx;
+    curveDragDy = (curveCanvas.height - gp.y * curveCanvas.height) - my;
     curveCanvas.setPointerCapture(e.pointerId);
   } else if (adj.curvePoints.length < 8) {
     const nx = Math.max(0, Math.min(1, mx / curveCanvas.width));
@@ -1094,8 +1108,8 @@ curveCanvas.addEventListener('pointermove', (e) => {
   const rect = curveCanvas.getBoundingClientRect();
   const scaleX = curveCanvas.width / rect.width, scaleY = curveCanvas.height / rect.height;
   const mx = (e.clientX - rect.left) * scaleX, my = (e.clientY - rect.top) * scaleY;
-  const nx = Math.max(0, Math.min(1, mx / curveCanvas.width));
-  const ny = Math.max(0, Math.min(1, 1 - my / curveCanvas.height));
+  const nx = Math.max(0, Math.min(1, (mx + curveDragDx) / curveCanvas.width));
+  const ny = Math.max(0, Math.min(1, 1 - (my + curveDragDy) / curveCanvas.height));
   adj.curvePoints[curveDrag] = { x: nx, y: ny };
   drawCurveGraph();
   render();
