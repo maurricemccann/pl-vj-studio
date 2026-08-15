@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PL VJ Studio</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="canvas"></canvas>
+    <div id="sidebar">
+      <div id="wordmark"><strong>PSYCHED LUXURIES</strong> · VJ Studio</div>
+      <select id="piece-select"></select>
+
+      <!-- Higher-frequency, direct-manipulation controls first (Zeus review,
+           S213): these sit above the deep six-folder options panel so live
+           tweaking never gets pushed below the fold by an accordion. -->
+      <div id="pads">
+        <div class="pad-block">
+          <label>Width x Taper</label>
+          <div class="pad" id="pad-width-taper"><div class="pad-dot"></div></div>
+        </div>
+        <div class="pad-block">
+          <label>Gap x Tremor</label>
+          <div class="pad" id="pad-gap-tremor"><div class="pad-dot"></div></div>
+        </div>
+      </div>
+
+      <div class="pad-block curve-block">
+        <label>Curve (click to add a point, drag to shape)</label>
+        <canvas id="curve-graph" width="248" height="140"></canvas>
+      </div>
+
+      <canvas id="freq-meter" width="256" height="48"></canvas>
+
+      <div id="panel"></div>
+
+      <p class="hint">Drag the white handles on canvas to reshape the selected ribbon's spline. Hover a segment to highlight it, click to select, wheel to add/remove points. Select a point and press H for handles, K to align, T to toggle tied/untied.</p>
+    </div>
+  </div>
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

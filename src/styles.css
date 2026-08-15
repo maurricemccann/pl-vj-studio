@@ -1,0 +1,91 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 100%; height: 100%; overflow: hidden;
+  background: #faf7f0; color: #1a1510;
+  font-family: 'DM Sans', system-ui, sans-serif;
+}
+#app { display: flex; width: 100vw; height: 100vh; }
+#canvas { display: block; }
+
+#sidebar {
+  width: 280px; height: 100vh; background: #fdf9f1; color: #1a1510;
+  display: flex; flex-direction: column; overflow-y: auto;
+  border-left: 1px solid rgba(160,140,110,0.22);
+}
+#wordmark {
+  padding: 16px 12px 4px;
+  font-family: 'Cormorant Garamond', Georgia, serif;
+  font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: #8a7235;
+}
+#wordmark strong { color: #1a1510; font-weight: 500; }
+
+#piece-select {
+  margin: 8px 12px 12px; padding: 8px; background: #f5efe2; color: #1a1510;
+  border: 1px solid rgba(160,140,110,0.35); border-radius: 6px; font-size: 13px;
+  font-family: 'DM Sans', system-ui, sans-serif;
+}
+#panel {
+  flex: 1;
+  /* Tweakpane's real public theming API (30 --tp-* custom properties,
+     confirmed in the vendored bundle's .tp-rotv rule) -- no edits to
+     vendor/tweakpane.js. Replaces its default dark/monospace theme with
+     the house cream/gold system so the panel stops clashing with the
+     sidebar chrome around it. */
+  --tp-base-background-color: #f5efe2;
+  --tp-base-border-radius: 6px;
+  --tp-base-font-family: 'DM Sans', system-ui, sans-serif;
+  --tp-base-shadow-color: rgba(26, 21, 16, 0.12);
+  --tp-blade-border-radius: 4px;
+  --tp-button-background-color: #ece2cc;
+  --tp-button-background-color-active: #c9a84c;
+  --tp-button-background-color-focus: #ddca9c;
+  --tp-button-background-color-hover: #e4d5ac;
+  --tp-button-foreground-color: #1a1510;
+  --tp-container-background-color: rgba(160, 140, 110, 0.08);
+  --tp-container-background-color-active: rgba(201, 168, 76, 0.25);
+  --tp-container-background-color-focus: rgba(201, 168, 76, 0.18);
+  --tp-container-background-color-hover: rgba(160, 140, 110, 0.14);
+  --tp-container-foreground-color: #1a1510;
+  --tp-input-background-color: #fdf9f1;
+  --tp-input-background-color-active: #f0e6cf;
+  --tp-input-background-color-focus: #f5edd8;
+  --tp-input-background-color-hover: #f7f1e4;
+  --tp-input-foreground-color: #1a1510;
+  --tp-label-foreground-color: #6b5d48;
+  --tp-monitor-background-color: rgba(160, 140, 110, 0.1);
+  --tp-monitor-foreground-color: #1a1510;
+  --tp-groove-foreground-color: rgba(160, 140, 110, 0.28);
+}
+
+#pads { display: flex; gap: 10px; padding: 10px 12px; }
+.pad-block { flex: 1; }
+.pad-block label {
+  display: block; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: #8a7235; margin-bottom: 4px;
+}
+.pad {
+  position: relative; width: 100%; aspect-ratio: 1; background: #f5efe2;
+  border: 1px solid rgba(160,140,110,0.35); border-radius: 6px; touch-action: none;
+}
+/* .pad-block's own spacing relies on #pads's flex row -- outside that
+   context (the standalone curve graph) it has zero inset and renders
+   flush to the sidebar edges. Real bug, caught by Zeus's review. */
+.curve-block { padding: 0 12px 10px; }
+.pad-dot {
+  position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px;
+  background: #c9a84c; border: 1.5px solid #1a1510; border-radius: 50%;
+  left: 50%; top: 50%; pointer-events: none;
+}
+
+#freq-meter {
+  display: block; width: calc(100% - 24px); height: 48px; margin: 4px 12px;
+  background: #f5efe2; border: 1px solid rgba(160,140,110,0.35); border-radius: 6px;
+}
+
+#curve-graph {
+  display: block; width: 100%; height: auto; touch-action: none;
+  background: #f5efe2; border: 1px solid rgba(160,140,110,0.35); border-radius: 6px;
+}
+
+.hint { font-size: 11px; color: #6b5d48; padding: 12px; line-height: 1.4; }
