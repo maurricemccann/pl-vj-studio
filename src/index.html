@@ -4,13 +4,39 @@
   <meta charset="UTF-8" />
   <title>PL VJ Studio</title>
   <link rel="stylesheet" href="styles.css" />
+  <!-- Phone-controller PWA (#215): installable home-screen app, standalone
+       (no browser chrome). Tags harmless in the Tauri desktop webview -- it
+       loads via Tauri's own asset protocol, never this manifest/icon route.
+       No service worker: registration requires a secure context, and a plain
+       LAN IP (http://192.168.x.x) doesn't qualify -- only localhost would.
+       "Add to Home Screen" itself needs none of that, so this is the real
+       ceiling for an installable icon over a local network without HTTPS. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#faf7f0" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="VJ Studio" />
+  <meta name="mobile-web-app-capable" content="yes" />
 </head>
 <body>
   <div id="app">
     <canvas id="canvas"></canvas>
+    <button id="present-toggle" type="button" title="Presentation / recording mode (F)">&#9974;</button>
     <div id="sidebar">
       <div id="wordmark"><strong>PSYCHED LUXURIES</strong> · VJ Studio</div>
+      <div id="controller-url"></div>
       <select id="piece-select"></select>
+
+      <!-- Composition (whole piece: Ground/Adjustments/Effects/Wander below) ->
+           ribbons as a group (this list + All/One buttons) -> individual ribbon
+           (click a row) -- the three settings tiers, founder-specified S215. -->
+      <div id="ribbon-list"></div>
+      <div id="ribbon-list-actions">
+        <button id="ribbon-select-all" type="button">All ribbons</button>
+        <button id="ribbon-select-one" type="button">Just this one</button>
+      </div>
 
       <!-- Higher-frequency, direct-manipulation controls first (Zeus review,
            S213): these sit above the deep six-folder options panel so live
@@ -35,7 +61,7 @@
 
       <div id="panel"></div>
 
-      <p class="hint">Drag the white handles on canvas to reshape the selected ribbon's spline. Hover a segment to highlight it, click to select, wheel to add/remove points. Select a point and press H for handles, K to align, T to toggle tied/untied.</p>
+      <p class="hint">Drag the white handles on canvas to reshape the selected ribbon's spline. Clicking a different ribbon's curve targets it for editing. Hover a segment to highlight it, click to select, wheel to add/remove points. Select a point: H for bezier handles, K to align, T to toggle tied/untied, W to reset its width handle. Drag the orange width handle to vary thickness at that point. F (or the button, top-right) toggles presentation/recording mode.</p>
     </div>
   </div>
   <script type="module" src="/main.js"></script>

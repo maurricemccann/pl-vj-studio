@@ -8,14 +8,33 @@ import { PIECES } from './pieces.js';
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const pieceSelect = document.getElementById('piece-select');
+const ribbonListEl = document.getElementById('ribbon-list');
 const freqCanvas = document.getElementById('freq-meter');
 const freqCtx = freqCanvas.getContext('2d');
 let W, HGT;
 
+// Wireless controller (#215): the same HTML/JS served two ways -- the Tauri
+// desktop webview (full app, renders the canvas) and a phone opening
+// http://<desktop-lan-ip>:8917 in a plain browser (panel only, no canvas, no
+// curve/bezier/width-handle geometry editing -- see the networking block near
+// the end of this file for the sync protocol). Detected by Tauri's own
+// injected API, not a URL param -- a bookmarked/PWA'd bare URL on the phone
+// must land in controller mode with no query string required (S215: typing
+// the bare Tailscale IP loaded full desktop mode instead, since only the
+// param was checked). `?controller` still works too, as a manual override.
+const isController = !window.__TAURI__ || new URLSearchParams(location.search).has('controller');
+if (isController) document.body.classList.add('controller-mode');
+
+// Presentation/recording mode (#F): sidebar hidden, canvas fills the window,
+// editor chrome (handles/segment highlights) skipped in render() -- clean
+// output for a screen capture, edits underneath are untouched.
+let presenting = false;
+
 function resize() {
   const dpr = window.devicePixelRatio || 1;
-  W = window.innerWidth - 280; // leave room for the panel
-  HGT = window.innerHeight;
+  if (isController) { W = 4; HGT = 4; } // no canvas UI on the phone -- keep the backing store trivial
+  else W = presenting ? window.innerWidth : window.innerWidth - 280; // leave room for the panel
+  if (!isController) HGT = window.innerHeight;
   canvas.width = W * dpr;
   canvas.height = HGT * dpr;
   canvas.style.width = W + 'px';
@@ -28,8 +47,17 @@ resize();
 // Deep-clone the active piece so edits (dragging, sliders) never mutate the
 // source library -- "reset" just re-clones from PIECES.
 let active = null;
+// selectedRibbon = the single "primary" target: curve editing (points/handles),
+// Animation/Modulation folders, the pads. multiSelect = the group that Ribbon
+// params (color/width/taper/tremor/gap/blend/outline) batch-applies to -- the
+// "ribbons as a whole" tier (founder S215): numeric params apply as a delta so
+// each ribbon's own relative variation survives a group edit; color/blend/glow
+// apply as an absolute set. A single-member group is just individual editing,
+// unchanged from before.
 let selectedRibbon = 0;
+let multiSelect = new Set([0]);
 let pane = null;
+let ribbonIndexObj = { value: 0 };
 
 // Curve-editing selection state (Group B) -- persists across mouse-up so a
 // point/segment stays addressable for keyboard shortcuts and the wheel.
@@ -49,9 +77,21 @@ function loadPiece(id) {
   drags.clear();
   const src = PIECES.find(p => p.id === id);
   active = JSON.parse(JSON.stringify(src));
+  // Default the group-editable fields on every ribbon up front (not just the
+  // primary, as before) -- a multi-select batch edit can now touch a ribbon
+  // that's never been opened in the "Ribbon params" folder yet.
+  active.ribbons.forEach(r => {
+    r.outlineWidth = r.outlineWidth ?? 0;
+    r.outlineColor = r.outlineColor || '#1a1510';
+    r.blend = r.blend || 'source-over';
+    r.closed = !!r.closed;
+  });
   selectedRibbon = 0;
+  multiSelect = new Set([0]);
   buildPane();
+  renderRibbonList();
   render();
+  scheduleSync();
 }
 
 // ============================================================
@@ -110,13 +150,16 @@ function morphTo(target, durationMs, useEase) {
 // ---- Shuffle (#5) ----
 function randomColor() { return hslToHex(Math.random() * 360, 55 + Math.random() * 25, 40 + Math.random() * 20); }
 function shuffleSelected() {
-  const r = active.ribbons[selectedRibbon];
   const jitter = (v, amt, min, max) => Math.max(min, Math.min(max, v + (Math.random() * 2 - 1) * amt));
-  r.width = jitter(r.width, 0.03, 0.01, 0.2);
-  r.taper = jitter(r.taper, 0.04, 0.02, 0.3);
-  r.tremor = jitter(r.tremor, 0.015, 0, 0.1);
-  r.gap = jitter(r.gap, 0.004, 0, 0.03);
-  r.ink = randomColor();
+  multiSelect.forEach(idx => {
+    const r = active.ribbons[idx];
+    if (!r) return;
+    r.width = jitter(r.width, 0.03, 0.01, 0.2);
+    r.taper = jitter(r.taper, 0.04, 0.02, 0.3);
+    r.tremor = jitter(r.tremor, 0.015, 0, 0.1);
+    r.gap = jitter(r.gap, 0.004, 0, 0.03);
+    r.ink = randomColor();
+  });
   render();
   if (pane) pane.refresh();
 }
@@ -519,6 +562,50 @@ function updateHandleDrag(ribbon, point, side, mx, my, dx, dy) {
   render();
 }
 
+// ---- Per-point width (founder S215: "the widths within the ribbons change
+// in my art point" -- width was one taper curve for the whole ribbon; now
+// each control point carries an optional widthMult (default 1), linearly
+// interpolated between neighboring points across the spline's u range and
+// multiplied into the taper envelope in render()'s wFn. A visual handle sits
+// on the local normal at the selected point, distance from the point encoding
+// the multiplier -- drag it out to fatten that stretch, in to thin it. ----
+function widthMultAt(r, u) {
+  const pts = r.points;
+  const n = pts.length;
+  const segCount = r.closed ? n : n - 1;
+  const segF = Math.max(0, Math.min(segCount - 1e-6, u * segCount));
+  const segIdx = Math.floor(segF);
+  const t = segF - segIdx;
+  const i0 = r.closed ? segIdx % n : segIdx;
+  const i1 = r.closed ? (segIdx + 1) % n : Math.min(n - 1, segIdx + 1);
+  const w0 = pts[i0].widthMult ?? 1;
+  const w1 = pts[i1].widthMult ?? 1;
+  return w0 + (w1 - w0) * t;
+}
+function pointNormalScreen(spts, i, closed) {
+  const n = spts.length;
+  const prev = spts[closed ? (i - 1 + n) % n : Math.max(0, i - 1)];
+  const next = spts[closed ? (i + 1) % n : Math.min(n - 1, i + 1)];
+  const dx = next.x - prev.x, dy = next.y - prev.y;
+  const m = Math.hypot(dx, dy) || 1;
+  return { x: -dy / m, y: dx / m };
+}
+const WIDTH_HANDLE_BASE = 14, WIDTH_HANDLE_SCALE = 18;
+function widthHandlePos(r, i) {
+  const spts = r.points.map(p => ({ x: p.x * W, y: p.y * HGT }));
+  const base = spts[i];
+  const nrm = pointNormalScreen(spts, i, r.closed);
+  const wm = r.points[i].widthMult ?? 1;
+  const dist = WIDTH_HANDLE_BASE + wm * WIDTH_HANDLE_SCALE;
+  return { x: base.x + nrm.x * dist, y: base.y + nrm.y * dist, base, nrm };
+}
+function hitTestWidthHandle(mx, my) {
+  if (!selectedPoint || selectedPoint.ribbon !== selectedRibbon) return false;
+  const r = active.ribbons[selectedRibbon];
+  const { x, y } = widthHandlePos(r, selectedPoint.point);
+  return Math.hypot(mx - x, my - y) < 8;
+}
+
 function distToSegment(px, py, a, b) {
   const dx = b.x - a.x, dy = b.y - a.y;
   const len2 = dx * dx + dy * dy || 1;
@@ -544,8 +631,8 @@ function hitTestHandle(mx, my) {
   }
   return null;
 }
-function hitTestSegment(mx, my) {
-  const r = active.ribbons[selectedRibbon];
+function hitTestSegment(mx, my, ribbonIdx = selectedRibbon) {
+  const r = active.ribbons[ribbonIdx];
   const spts = r.points.map(p => ({ x: p.x * W, y: p.y * HGT }));
   const segCount = r.closed ? spts.length : spts.length - 1;
   let best = -1, bestD = 14;
@@ -575,24 +662,90 @@ function finalizeSketch() {
 }
 
 // ============================================================
+// Ribbon list -- the group-selection UI (plain DOM, not Tweakpane): click a
+// row to make it the primary edit target (curve editing + Animation/
+// Modulation), check its box to fold it into the "Ribbon params" batch-edit
+// group without changing the primary. Driven by the founder's own framing
+// (S215): composition (Ground/Adjustments/Effects/Wander, already global) ->
+// ribbons as a whole (this list, or "All ribbons") -> individual (one row).
+// ============================================================
+function setPrimaryRibbon(idx, { resetGroup = true } = {}) {
+  if (idx < 0 || idx >= active.ribbons.length) return;
+  selectedRibbon = idx;
+  if (resetGroup) multiSelect = new Set([idx]);
+  else multiSelect.add(idx);
+  selectedPoint = null; selectedSegment = null; hoverSegment = null;
+  if (pane) { ribbonIndexObj.value = idx; pane.refresh(); }
+  buildRibbonFolder();
+  renderRibbonList();
+  render();
+}
+
+function renderRibbonList() {
+  if (!active) return;
+  ribbonListEl.innerHTML = '';
+  active.ribbons.forEach((r, i) => {
+    const row = document.createElement('div');
+    row.className = 'ribbon-row' + (i === selectedRibbon ? ' primary' : '') + (multiSelect.has(i) ? ' in-group' : '');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = multiSelect.has(i);
+    cb.title = 'Include in the batch-edit group';
+    cb.addEventListener('click', (e) => e.stopPropagation());
+    cb.addEventListener('change', () => {
+      if (cb.checked) multiSelect.add(i);
+      else if (multiSelect.size > 1) multiSelect.delete(i);
+      else cb.checked = true; // group can't go empty -- keep at least one
+      renderRibbonList();
+      buildRibbonFolder();
+    });
+    const swatch = document.createElement('span');
+    swatch.className = 'ribbon-swatch';
+    swatch.style.background = r.ink;
+    const label = document.createElement('span');
+    label.className = 'ribbon-label';
+    label.textContent = `Ribbon ${i + 1}`;
+    row.append(cb, swatch, label);
+    row.addEventListener('click', () => setPrimaryRibbon(i));
+    ribbonListEl.appendChild(row);
+  });
+}
+document.getElementById('ribbon-select-all').addEventListener('click', () => {
+  multiSelect = new Set(active.ribbons.map((_, i) => i));
+  renderRibbonList();
+  buildRibbonFolder();
+});
+document.getElementById('ribbon-select-one').addEventListener('click', () => {
+  multiSelect = new Set([selectedRibbon]);
+  renderRibbonList();
+  buildRibbonFolder();
+});
+
+// ============================================================
 // Panel (Tweakpane)
 // ============================================================
 function buildPane() {
   if (pane) pane.dispose();
   pane = new Pane({ title: active.name, container: document.getElementById('panel') });
 
-  pane.addBinding(active, 'ground', { label: 'Ground' }).on('change', render);
+  pane.addBinding(active, 'ground', { label: 'Ground' }).on('change', () => { render(); scheduleSync(); });
 
   const ribbonNames = active.ribbons.map((_, i) => `Ribbon ${i + 1}`);
-  const ribbonIndex = { value: 0 };
-  pane.addBinding(ribbonIndex, 'value', {
+  ribbonIndexObj.value = selectedRibbon;
+  pane.addBinding(ribbonIndexObj, 'value', {
     label: 'Editing', options: Object.fromEntries(ribbonNames.map((n, i) => [n, i])),
-  }).on('change', (ev) => { selectedRibbon = ev.value; selectedPoint = null; selectedSegment = null; buildRibbonFolder(); render(); });
+  }).on('change', (ev) => setPrimaryRibbon(ev.value));
 
   buildRibbonFolder();
-  buildCurveFolder();
-  buildAnimationFolder();
-  buildModulationFolder();
+  // Geometry editing (Curve editing's closed-loop/sketch) needs the canvas +
+  // pointer-drag machinery; Animation/Modulation's audio/camera/keyframe
+  // playback is a live per-device timer, not something a "set this value"
+  // sync message models cleanly yet (S215 scope cut, named to the founder).
+  // Both stay desktop-only for v1 -- the phone drives Ribbon params/Ground/
+  // Adjustments/Effects, the actual "fader board" surface.
+  if (!isController) buildCurveFolder();
+  if (!isController) buildAnimationFolder();
+  if (!isController) buildModulationFolder();
   buildAdjustmentsFolder();
   buildEffectsFolder();
 
@@ -613,7 +766,51 @@ function buildPane() {
 // gets a working slider with zero new main.js code.
 const NUMERIC_DEFAULTS = { width: [0.01, 0.2, 0.005], taper: [0.02, 0.3, 0.005], tremor: [0, 0.1, 0.002], gap: [0, 0.03, 0.001], outlineWidth: [0, 0.03, 0.001] };
 const SKIP_KEYS = new Set(['points', 'ink', 'core', 'glow', 'closed']);
-function autoBindNumeric(folder, obj, onChange) {
+
+// Multi-select apply (#215): numeric params apply as a DELTA across every
+// ribbon in multiSelect -- each ribbon keeps its own relative width/taper/etc,
+// the group just nudges together (Photoshop/Blender multi-object-edit
+// convention). Color/blend/glow apply as an absolute SET -- "same color/blend
+// mode across the group" is what a group edit means for those.
+function bindMultiNumeric(folder, key, opts) {
+  const r = active.ribbons[selectedRibbon];
+  const proxy = { [key]: r[key] };
+  let last = r[key];
+  folder.addBinding(proxy, key, opts).on('change', (ev) => {
+    const delta = ev.value - last;
+    last = ev.value;
+    multiSelect.forEach(idx => {
+      const rr = active.ribbons[idx];
+      if (!rr || typeof rr[key] !== 'number') return;
+      const nv = rr[key] + delta;
+      rr[key] = opts.min !== undefined ? Math.max(opts.min, Math.min(opts.max, nv)) : nv;
+    });
+    render();
+    scheduleSync();
+  });
+}
+function bindMultiAbsolute(folder, key, opts, guard) {
+  const r = active.ribbons[selectedRibbon];
+  const proxy = { [key]: r[key] };
+  folder.addBinding(proxy, key, opts).on('change', (ev) => {
+    multiSelect.forEach(idx => {
+      const rr = active.ribbons[idx];
+      if (!rr) return;
+      if (guard && !guard(rr)) return;
+      rr[key] = ev.value;
+    });
+    render();
+    scheduleSync();
+  });
+}
+
+// #19: auto-generate a widget from the parameter's own type/naming
+// convention instead of a hand-wired addBinding per param. A numeric
+// key with sibling <key>Min/<key>Max on the object gets that range; a
+// key with no siblings falls back to a small known-parameter default
+// table -- either way, adding a NEW numeric ribbon field in pieces.js
+// gets a working slider with zero new main.js code.
+function autoBindNumeric(folder, obj) {
   Object.keys(obj).forEach(key => {
     if (SKIP_KEYS.has(key) || key.endsWith('Min') || key.endsWith('Max') || key.endsWith('Step')) return;
     if (typeof obj[key] !== 'number') return;
@@ -622,7 +819,7 @@ function autoBindNumeric(folder, obj, onChange) {
     const min = hasRange ? obj[key + 'Min'] : defMin;
     const max = hasRange ? obj[key + 'Max'] : defMax;
     const step = obj[key + 'Step'] !== undefined ? obj[key + 'Step'] : defStep;
-    folder.addBinding(obj, key, { min, max, step }).on('change', onChange);
+    bindMultiNumeric(folder, key, { min, max, step });
   });
 }
 
@@ -630,16 +827,14 @@ let ribbonFolder = null;
 function buildRibbonFolder() {
   if (ribbonFolder) ribbonFolder.dispose();
   const r = active.ribbons[selectedRibbon];
-  ribbonFolder = pane.addFolder({ title: `Ribbon ${selectedRibbon + 1} params` });
-  r.outlineWidth = r.outlineWidth ?? 0;
-  r.outlineColor = r.outlineColor || '#1a1510';
-  r.blend = r.blend || 'source-over';
-  autoBindNumeric(ribbonFolder, r, render);
-  ribbonFolder.addBinding(r, 'ink', { view: 'color' }).on('change', render);
-  if (r.core !== undefined) ribbonFolder.addBinding(r, 'core', { view: 'color' }).on('change', render);
-  if (r.glow !== undefined) ribbonFolder.addBinding(r, 'glow').on('change', render);
-  ribbonFolder.addBinding(r, 'outlineColor', { view: 'color', label: 'Outline color' }).on('change', render);
-  ribbonFolder.addBinding(r, 'blend', { label: 'Blend mode', options: BLEND_MODES }).on('change', render);
+  const n = multiSelect.size;
+  ribbonFolder = pane.addFolder({ title: n > 1 ? `Ribbon params (${n} selected)` : `Ribbon ${selectedRibbon + 1} params` });
+  autoBindNumeric(ribbonFolder, r);
+  bindMultiAbsolute(ribbonFolder, 'ink', { view: 'color' });
+  if (r.core !== undefined) bindMultiAbsolute(ribbonFolder, 'core', { view: 'color' }, (rr) => rr.core !== undefined);
+  if (r.glow !== undefined) bindMultiAbsolute(ribbonFolder, 'glow', {}, (rr) => rr.glow !== undefined);
+  bindMultiAbsolute(ribbonFolder, 'outlineColor', { view: 'color', label: 'Outline color' });
+  bindMultiAbsolute(ribbonFolder, 'blend', { label: 'Blend mode', options: BLEND_MODES });
 }
 
 // #9 closed loop toggle + #11 sketch-to-spline, live per selected ribbon.
@@ -647,7 +842,7 @@ function buildCurveFolder() {
   const cf = pane.addFolder({ title: 'Curve editing', expanded: false });
   const r = active.ribbons[selectedRibbon];
   r.closed = !!r.closed;
-  cf.addBinding(r, 'closed', { label: 'Closed loop' }).on('change', render);
+  cf.addBinding(r, 'closed', { label: 'Closed loop' }).on('change', () => { render(); scheduleSync(); });
   const sketchBtn = cf.addButton({ title: sketchMode.active ? 'Stop sketching' : 'Sketch new ribbon' });
   sketchBtn.on('click', () => {
     sketchMode.active = !sketchMode.active;
@@ -660,7 +855,7 @@ function buildCurveFolder() {
 function buildAnimationFolder() {
   const animFolder = pane.addFolder({ title: 'Animation', expanded: false });
 
-  animFolder.addButton({ title: 'Shuffle selected ribbon' }).on('click', shuffleSelected);
+  animFolder.addButton({ title: 'Shuffle selected group' }).on('click', shuffleSelected);
 
   const wanderFolder = animFolder.addFolder({ title: 'Ambient wander (all ribbons)' });
   wanderFolder.addBinding(wander, 'enabled');
@@ -736,40 +931,40 @@ function buildModulationFolder() {
 
 function buildAdjustmentsFolder() {
   const af = pane.addFolder({ title: 'Adjustments', expanded: false });
-  af.addBinding(adj, 'hue', { min: -180, max: 180, step: 1 }).on('change', render);
-  af.addBinding(adj, 'saturation', { min: -100, max: 100, step: 1 }).on('change', render);
-  af.addBinding(adj, 'brightness', { min: -100, max: 100, step: 1 }).on('change', render);
+  af.addBinding(adj, 'hue', { min: -180, max: 180, step: 1 }).on('change', () => { render(); scheduleSync(); });
+  af.addBinding(adj, 'saturation', { min: -100, max: 100, step: 1 }).on('change', () => { render(); scheduleSync(); });
+  af.addBinding(adj, 'brightness', { min: -100, max: 100, step: 1 }).on('change', () => { render(); scheduleSync(); });
 
   const cb = af.addFolder({ title: 'Color Balance', expanded: false });
-  cb.addBinding(adj, 'shadowsTint', { view: 'color', label: 'Shadows' }).on('change', render);
-  cb.addBinding(adj, 'shadowsAmt', { min: 0, max: 100, step: 1, label: 'Shadows amt' }).on('change', render);
-  cb.addBinding(adj, 'midsTint', { view: 'color', label: 'Midtones' }).on('change', render);
-  cb.addBinding(adj, 'midsAmt', { min: 0, max: 100, step: 1, label: 'Midtones amt' }).on('change', render);
-  cb.addBinding(adj, 'highsTint', { view: 'color', label: 'Highlights' }).on('change', render);
-  cb.addBinding(adj, 'highsAmt', { min: 0, max: 100, step: 1, label: 'Highlights amt' }).on('change', render);
+  cb.addBinding(adj, 'shadowsTint', { view: 'color', label: 'Shadows' }).on('change', () => { render(); scheduleSync(); });
+  cb.addBinding(adj, 'shadowsAmt', { min: 0, max: 100, step: 1, label: 'Shadows amt' }).on('change', () => { render(); scheduleSync(); });
+  cb.addBinding(adj, 'midsTint', { view: 'color', label: 'Midtones' }).on('change', () => { render(); scheduleSync(); });
+  cb.addBinding(adj, 'midsAmt', { min: 0, max: 100, step: 1, label: 'Midtones amt' }).on('change', () => { render(); scheduleSync(); });
+  cb.addBinding(adj, 'highsTint', { view: 'color', label: 'Highlights' }).on('change', () => { render(); scheduleSync(); });
+  cb.addBinding(adj, 'highsAmt', { min: 0, max: 100, step: 1, label: 'Highlights amt' }).on('change', () => { render(); scheduleSync(); });
 
   const cv = af.addFolder({ title: 'Curves', expanded: false });
-  cv.addBinding(adj, 'curveEnabled', { label: 'Enable (drag the graph below)' }).on('change', render);
+  cv.addBinding(adj, 'curveEnabled', { label: 'Enable (drag the graph below)' }).on('change', () => { render(); scheduleSync(); });
   cv.addButton({ title: 'Reset curve' }).on('click', () => {
     adj.curvePoints = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
     drawCurveGraph(); render();
   });
 
   const gm = af.addFolder({ title: 'Gradient Map', expanded: false });
-  gm.addBinding(adj, 'gradientEnabled', { label: 'Enable' }).on('change', render);
-  gm.addBinding(adj.gradientStops, '0', { view: 'color', label: 'Shadow color' }).on('change', render);
-  gm.addBinding(adj.gradientStops, '1', { view: 'color', label: 'Highlight color' }).on('change', render);
+  gm.addBinding(adj, 'gradientEnabled', { label: 'Enable' }).on('change', () => { render(); scheduleSync(); });
+  gm.addBinding(adj.gradientStops, '0', { view: 'color', label: 'Shadow color' }).on('change', () => { render(); scheduleSync(); });
+  gm.addBinding(adj.gradientStops, '1', { view: 'color', label: 'Highlight color' }).on('change', () => { render(); scheduleSync(); });
 }
 
 function buildEffectsFolder() {
   const ef = pane.addFolder({ title: 'Effects', expanded: false });
-  ef.addBinding(fx, 'opacity', { min: 0, max: 1, step: 0.01 }).on('change', render);
-  ef.addBinding(fx, 'noise', { min: 0, max: 1, step: 0.01 }).on('change', render);
-  ef.addBinding(fx, 'sharpen', { min: 0, max: 1, step: 0.01 }).on('change', render);
-  ef.addBinding(fx, 'bloom', { min: 0, max: 1, step: 0.01 }).on('change', render);
-  ef.addBinding(fx, 'glitch', { min: 0, max: 1, step: 0.01 }).on('change', render);
-  ef.addBinding(fx, 'halftone', { min: 0, max: 1, step: 0.01 }).on('change', render);
-  ef.addBinding(fx, 'chromaticAberration', { min: 0, max: 1, step: 0.01, label: 'Chromatic aberration' }).on('change', render);
+  ef.addBinding(fx, 'opacity', { min: 0, max: 1, step: 0.01 }).on('change', () => { render(); scheduleSync(); });
+  ef.addBinding(fx, 'noise', { min: 0, max: 1, step: 0.01 }).on('change', () => { render(); scheduleSync(); });
+  ef.addBinding(fx, 'sharpen', { min: 0, max: 1, step: 0.01 }).on('change', () => { render(); scheduleSync(); });
+  ef.addBinding(fx, 'bloom', { min: 0, max: 1, step: 0.01 }).on('change', () => { render(); scheduleSync(); });
+  ef.addBinding(fx, 'glitch', { min: 0, max: 1, step: 0.01 }).on('change', () => { render(); scheduleSync(); });
+  ef.addBinding(fx, 'halftone', { min: 0, max: 1, step: 0.01 }).on('change', () => { render(); scheduleSync(); });
+  ef.addBinding(fx, 'chromaticAberration', { min: 0, max: 1, step: 0.01, label: 'Chromatic aberration' }).on('change', () => { render(); scheduleSync(); });
 }
 
 // ============================================================
@@ -791,7 +986,7 @@ function render() {
     });
     const pl = H.splineHandles(pts, 220, r.closed);
     const minDim = Math.min(W, HGT);
-    const wFn = (u) => H.widthAt(u, r.width * minDim, r.taper, false, false);
+    const wFn = (u) => H.widthAt(u, r.width * minDim, r.taper, false, false) * widthMultAt(r, u);
     const gapPx = Math.max(3, r.gap * minDim);
 
     if (r.glow) { ctx.save(); ctx.shadowColor = r.ink; ctx.shadowBlur = 24; }
@@ -844,6 +1039,11 @@ function render() {
 
   postFX();
 
+  // ---- Editor chrome (segment highlights, point/bezier/width handles, sketch
+  // preview) -- skipped entirely in presentation/recording mode (#F) so a
+  // capture shows the clean artwork, exactly like it looks with nothing
+  // selected, regardless of what's mid-edit underneath. ----
+  if (!presenting) {
   // ---- Control-polygon segment highlight (Group B #6), selected ribbon only ----
   const sel = active.ribbons[selectedRibbon];
   const spts = sel.points.map(p => ({ x: p.x * W, y: p.y * HGT }));
@@ -872,7 +1072,8 @@ function render() {
     ctx.stroke();
   });
 
-  // ---- Bezier handle markers (Group B #8/#10), selected point only ----
+  // ---- Bezier handle markers (Group B #8/#10) + the width handle (#215),
+  // selected point only ----
   if (selectedPoint && selectedPoint.ribbon === selectedRibbon) {
     const pt = sel.points[selectedPoint.point];
     const base = spts[selectedPoint.point];
@@ -885,6 +1086,15 @@ function render() {
       ctx.fillStyle = isHandleDragging ? '#ff4d4d' : '#5f93a3';
       ctx.fillRect(hx - 4, hy - 4, 8, 8);
     });
+
+    const wh = widthHandlePos(sel, selectedPoint.point);
+    const isWidthDragging = [...drags.values()].some(d => d.type === 'width' && d.point === selectedPoint.point);
+    ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(wh.x, wh.y);
+    ctx.strokeStyle = '#c9744d'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.beginPath(); ctx.arc(wh.x, wh.y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = isWidthDragging ? '#ff4d4d' : '#c9744d';
+    ctx.fill();
+    ctx.strokeStyle = '#000000'; ctx.lineWidth = 1; ctx.stroke();
   }
 
   // ---- Sketch-in-progress stroke preview (Group B #11) ----
@@ -895,6 +1105,7 @@ function render() {
     ctx.strokeStyle = '#c9a84c';
     ctx.lineWidth = 2;
     ctx.stroke();
+  }
   }
 }
 
@@ -926,12 +1137,30 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   }
 
-  const pi = hitTestPoint(mx, my, selectedRibbon);
+  if (hitTestWidthHandle(mx, my)) {
+    drags.set(e.pointerId, { type: 'width', ribbon: selectedRibbon, point: selectedPoint.point });
+    canvas.setPointerCapture(e.pointerId);
+    return;
+  }
+
+  // Point hit: try the primary ribbon first, then every other ribbon --
+  // clicking another curve while editing retargets the primary to it
+  // (founder S215), same as picking it from the "Editing" dropdown/list.
+  let pi = hitTestPoint(mx, my, selectedRibbon);
+  let targetRibbon = selectedRibbon;
+  if (pi < 0) {
+    for (let idx = 0; idx < active.ribbons.length; idx++) {
+      if (idx === selectedRibbon) continue;
+      const hit = hitTestPoint(mx, my, idx);
+      if (hit >= 0) { targetRibbon = idx; pi = hit; break; }
+    }
+  }
   if (pi >= 0) {
-    selectedPoint = { ribbon: selectedRibbon, point: pi };
-    const gp = active.ribbons[selectedRibbon].points[pi];
+    if (targetRibbon !== selectedRibbon) setPrimaryRibbon(targetRibbon);
+    selectedPoint = { ribbon: targetRibbon, point: pi };
+    const gp = active.ribbons[targetRibbon].points[pi];
     drags.set(e.pointerId, {
-      type: 'point', ribbon: selectedRibbon, point: pi,
+      type: 'point', ribbon: targetRibbon, point: pi,
       dx: gp.x * W - mx, dy: gp.y * HGT - my,
     });
     canvas.setPointerCapture(e.pointerId);
@@ -939,7 +1168,16 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   }
 
-  const si = hitTestSegment(mx, my);
+  let si = hitTestSegment(mx, my, selectedRibbon);
+  let segRibbon = selectedRibbon;
+  if (si < 0) {
+    for (let idx = 0; idx < active.ribbons.length; idx++) {
+      if (idx === selectedRibbon) continue;
+      const hit = hitTestSegment(mx, my, idx);
+      if (hit >= 0) { segRibbon = idx; si = hit; break; }
+    }
+  }
+  if (si >= 0 && segRibbon !== selectedRibbon) setPrimaryRibbon(segRibbon);
   selectedSegment = si >= 0 ? si : null;
   if (si < 0) selectedPoint = null;
   render();
@@ -966,8 +1204,16 @@ canvas.addEventListener('pointermove', (e) => {
     updateHandleDrag(d.ribbon, d.point, d.side, mx, my, d.dx, d.dy);
     return;
   }
+  if (d && d.type === 'width') {
+    const r = active.ribbons[d.ribbon];
+    const { base, nrm } = widthHandlePos(r, d.point);
+    const proj = (mx - base.x) * nrm.x + (my - base.y) * nrm.y;
+    r.points[d.point].widthMult = Math.max(0.15, Math.min(3, (proj - WIDTH_HANDLE_BASE) / WIDTH_HANDLE_SCALE));
+    render();
+    return;
+  }
   if (!d) {
-    const si = hitTestSegment(mx, my);
+    const si = hitTestSegment(mx, my, selectedRibbon);
     if (si !== hoverSegment) { hoverSegment = si; render(); }
   }
 });
@@ -1009,7 +1255,40 @@ window.addEventListener('keydown', (e) => {
     alignSelectedPoint();
   } else if (e.key === 't' || e.key === 'T') {
     pt.tied = pt.tied === false ? true : false;
+  } else if (e.key === 'w' || e.key === 'W') {
+    delete pt.widthMult;
+    render();
   }
+});
+
+// ============================================================
+// Presentation / recording mode (#F): hide the sidebar, canvas fills the
+// window, editor chrome stops drawing (render()'s `if (!presenting)` block).
+// Also requests real OS fullscreen where available (falls back silently --
+// Tauri's webview may deny it) so a screen recording has zero chrome outside
+// the artwork either way.
+// ============================================================
+const presentToggle = document.getElementById('present-toggle');
+function setPresenting(on) {
+  presenting = on;
+  document.body.classList.toggle('presenting', on);
+  resize();
+  render();
+  if (on && document.documentElement.requestFullscreen) {
+    document.documentElement.requestFullscreen().catch(() => {});
+  } else if (!on && document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {});
+  }
+}
+presentToggle.addEventListener('click', () => setPresenting(!presenting));
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && presenting) setPresenting(false);
+});
+window.addEventListener('keydown', (e) => {
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (e.key === 'f' || e.key === 'F') setPresenting(!presenting);
+  else if (e.key === 'Escape' && presenting) setPresenting(false);
 });
 
 // ============================================================
@@ -1030,6 +1309,7 @@ function wirePad(padEl, paramX, paramY, rangeX, rangeY) {
     dot.style.top = (ry * 100) + '%';
     render();
     if (pane) pane.refresh();
+    scheduleSync();
   }
   padEl.addEventListener('pointerdown', (e) => { padEl.setPointerCapture(e.pointerId); setFromEvent(e); });
   padEl.addEventListener('pointermove', (e) => { if (e.buttons) setFromEvent(e); });
@@ -1101,6 +1381,7 @@ curveCanvas.addEventListener('pointerdown', (e) => {
     adj.curvePoints.sort((a, b) => a.x - b.x);
     drawCurveGraph();
     render();
+    scheduleSync();
   }
 });
 curveCanvas.addEventListener('pointermove', (e) => {
@@ -1113,12 +1394,14 @@ curveCanvas.addEventListener('pointermove', (e) => {
   adj.curvePoints[curveDrag] = { x: nx, y: ny };
   drawCurveGraph();
   render();
+  scheduleSync();
 });
 window.addEventListener('pointerup', (e) => {
   if (curveDrag === null) return;
   adj.curvePoints.sort((a, b) => a.x - b.x);
   curveDrag = null;
   drawCurveGraph();
+  scheduleSync();
 });
 drawCurveGraph();
 
@@ -1197,6 +1480,64 @@ function applyCustomBlendRibbon(mode, drawFn) {
     }
   }
   ctx.putImageData(base, 0, 0);
+}
+
+// ============================================================
+// Wireless controller networking (#215). The desktop app and a phone opening
+// ?controller both load this exact file and both connect to the same
+// embedded WS relay (src-tauri/src/server.rs, port 8917 -- desktop always
+// via 127.0.0.1 since the server runs in-process; the phone via whatever LAN/
+// Tailscale host it typed in, so location.hostname is already right there).
+// The relay does no interpretation: whoever last sent a `{active, adj, fx}`
+// blob wins, and it's rebroadcast to every other connected client. A device
+// ignores an incoming message that's byte-identical to the last one IT sent,
+// so its own edit doesn't bounce back and rebuild the panel mid-drag.
+// ============================================================
+let ws = null;
+let lastSentJSON = null;
+let syncTimer = null;
+function sendState() {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !active) return;
+  const payload = JSON.stringify({ active, adj, fx });
+  lastSentJSON = payload;
+  ws.send(payload);
+}
+function scheduleSync() {
+  if (syncTimer) return;
+  syncTimer = setTimeout(() => { syncTimer = null; sendState(); }, 60);
+}
+function applyRemoteState(payload) {
+  if (payload.active) {
+    active = payload.active;
+    selectedRibbon = Math.min(selectedRibbon, active.ribbons.length - 1);
+    multiSelect = new Set([...multiSelect].filter(i => i < active.ribbons.length));
+    if (multiSelect.size === 0) multiSelect.add(selectedRibbon);
+  }
+  if (payload.adj) Object.assign(adj, payload.adj);
+  if (payload.fx) Object.assign(fx, payload.fx);
+  if (pane) buildPane();
+  renderRibbonList();
+  drawCurveGraph();
+  render();
+}
+function connectWS() {
+  const host = isController ? location.hostname : '127.0.0.1';
+  ws = new WebSocket(`ws://${host}:8917/ws`);
+  ws.addEventListener('message', (ev) => {
+    if (ev.data === lastSentJSON) return; // ignore our own echo
+    try { applyRemoteState(JSON.parse(ev.data)); } catch { /* malformed/partial frame -- drop it */ }
+  });
+  ws.addEventListener('close', () => { ws = null; setTimeout(connectWS, 1500); });
+  ws.addEventListener('error', () => { try { ws.close(); } catch { /* already closing */ } });
+  if (!isController) ws.addEventListener('open', () => sendState(), { once: true });
+}
+connectWS();
+
+if (!isController && window.__TAURI__) {
+  window.__TAURI__.core.invoke('controller_url').then((url) => {
+    const el = document.getElementById('controller-url');
+    if (el) el.textContent = `Phone: ${url}?controller`;
+  }).catch(() => {});
 }
 
 // ---- Piece switcher ----
