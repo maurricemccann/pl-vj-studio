@@ -5,6 +5,7 @@ import { Pane } from './vendor/tweakpane.js';
 import { H } from './engine.js';
 import { PIECES } from './pieces.js';
 import { createPostFxGl } from './postfx-gl.js';
+import { drawRibbonMaterial, RIBBON_MATERIALS } from './ribbon-materials.js';
 
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -428,15 +429,16 @@ function buildCurveLUT(points) {
 }
 function hexToRgbArr(hex) { const c = hexToRgb(hex); return [c.r, c.g, c.b]; }
 
-// SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 1: postFX() now dispatches to
-// the WebGL compositor (one combined shader pass) when available, falling
-// back to the original per-effect CPU loops below (postFXCpu) only if
-// WebGL2 failed to initialize. AT1's frame-time readout wraps whichever
-// path actually ran, so the number is honest either way.
+// SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 1/2: postFX() reports its own
+// sub-timing into lastPostFxMs/Mode instead of writing the readout directly
+// -- render() (below) owns the combined total, since Phase 2's ribbon
+// materials add real cost of their own that a postFX-only number would miss
+// entirely (AT3 needs the STACKED total, not just the post-effects slice).
+let lastPostFxMs = 0, lastPostFxMode = null;
 function postFX() {
   const anyAdj = adj.hue || adj.saturation || adj.brightness || adj.shadowsAmt || adj.midsAmt || adj.highsAmt || adj.curveEnabled || adj.gradientEnabled;
   const anyFx = fx.noise || fx.sharpen || fx.bloom || fx.glitch || fx.halftone || fx.opacity < 1 || fx.chromaticAberration;
-  if (!anyAdj && !anyFx) { if (frameStatEl) frameStatEl.textContent = ''; return; }
+  if (!anyAdj && !anyFx) { lastPostFxMode = null; return; }
 
   const t0 = performance.now();
 
@@ -448,11 +450,8 @@ function postFX() {
     postFXCpu();
   }
 
-  if (frameStatEl) {
-    const ms = performance.now() - t0;
-    const mode = postFxGl ? 'GL' : (postFxGlError ? `CPU fallback: ${postFxGlError}` : 'CPU');
-    frameStatEl.textContent = `postFX ${ms.toFixed(1)}ms (${mode})${ms > 16.6 ? ' ⚠' : ''}`;
-  }
+  lastPostFxMs = performance.now() - t0;
+  lastPostFxMode = postFxGl ? 'GL' : (postFxGlError ? `CPU fallback: ${postFxGlError}` : 'CPU');
 }
 
 function postFXCpu() {
@@ -894,8 +893,16 @@ let ribbonFolder = null;
 function buildRibbonFolder() {
   if (ribbonFolder) ribbonFolder.dispose();
   const r = active.ribbons[selectedRibbon];
+  // SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 2: defaults for the new
+  // per-ribbon material fields, same init pattern buildCurveFolder already
+  // uses for `closed` -- must exist before autoBindNumeric reads
+  // Object.keys(r), and pieces loaded from PIECES won't have these yet.
+  r.material = r.material || 'ribbon';
+  if (r.materialAmount === undefined) r.materialAmount = 0.5;
+  if (r.materialSpeed === undefined) r.materialSpeed = 0.5;
   const n = multiSelect.size;
   ribbonFolder = pane.addFolder({ title: n > 1 ? `Ribbon params (${n} selected)` : `Ribbon ${selectedRibbon + 1} params` });
+  bindMultiAbsolute(ribbonFolder, 'material', { label: 'Material', options: RIBBON_MATERIALS });
   autoBindNumeric(ribbonFolder, r);
   bindMultiAbsolute(ribbonFolder, 'ink', { view: 'color' });
   if (r.core !== undefined) bindMultiAbsolute(ribbonFolder, 'core', { view: 'color' }, (rr) => rr.core !== undefined);
@@ -1044,6 +1051,7 @@ function buildEffectsFolder() {
 // Render
 // ============================================================
 function render() {
+  const _renderT0 = performance.now();
   ctx.fillStyle = active.ground;
   ctx.fillRect(0, 0, W, HGT);
 
@@ -1069,7 +1077,18 @@ function render() {
     ctx.fill();
 
     const isCustomBlend = CUSTOM_BLEND_NAMES.has(r.blend);
-    if (isCustomBlend) {
+    if (r.material && r.material !== 'ribbon') {
+      // SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 2: the 4 new materials
+      // draw their own internal paths (multiple passes/stamps/dots), not one
+      // fillable H.ribbonPath call -- so unlike the two branches below, the
+      // outline stroke a few lines down needs the plain silhouette path
+      // rebuilt (unfilled) here, since "the same path is still current"
+      // no longer holds after a material's own drawing.
+      drawRibbonMaterial(ctx, pl, wFn, r, r.tremor, r.closed);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = r.ink;
+      H.ribbonPath(ctx, pl, wFn, 0, r.tremor, r.closed);
+    } else if (isCustomBlend) {
       applyCustomBlendRibbon(r.blend, (sctx) => {
         sctx.fillStyle = r.ink;
         H.ribbonPath(sctx, pl, wFn, 0, r.tremor, r.closed);
@@ -1179,6 +1198,16 @@ function render() {
     ctx.lineWidth = 2;
     ctx.stroke();
   }
+  }
+
+  // SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 1 AT1 / Phase 2 AT3: the
+  // real measured total, not just postFX's slice of it -- ribbon drawing
+  // and the new materials cost real time too, and stacking THOSE is exactly
+  // what the founder's original "gets laggy" complaint was about.
+  if (frameStatEl) {
+    const totalMs = performance.now() - _renderT0;
+    const postFxPart = lastPostFxMode ? ` · postFX ${lastPostFxMs.toFixed(1)}ms (${lastPostFxMode})` : '';
+    frameStatEl.textContent = `render ${totalMs.toFixed(1)}ms${postFxPart}${totalMs > 16.6 ? ' ⚠' : ''}`;
   }
 }
 
