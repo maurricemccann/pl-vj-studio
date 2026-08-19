@@ -92,6 +92,9 @@ let selectedSegment = null; // index into the control polygon
 let hoverSegment = null;
 let lastHandleSide = 'hOut';
 const drags = new Map();    // pointerId -> {type:'point'|'handle'|'sketch', ...} -- multi-touch (Group D #21)
+// founder S221, Phase 3 AT1: pointer travel under this, between down and up,
+// counts as a click (select only) not a drag (moves the point).
+const CLICK_THRESHOLD_PX = 5;
 const sketchMode = { active: false, stroke: [] };
 
 function loadPiece(id) {
@@ -310,9 +313,13 @@ function camTick() {
   requestAnimationFrame(camTick);
 }
 
+// founder S221 (SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 3 AT3): target2/
+// amount2 let one LFO drive a second parameter from the same oscillator
+// phase, e.g. width AND tremor together -- 'none' means single-target,
+// same behavior as before this field existed.
 const lfos = [
-  { enabled: false, waveform: 'sine', period: 2000, phase: 0, hold: false, target: 'tremor', amount: 0.02 },
-  { enabled: false, waveform: 'sine', period: 3000, phase: 0.25, hold: false, target: 'gap', amount: 0.006 },
+  { enabled: false, waveform: 'sine', period: 2000, phase: 0, hold: false, target: 'tremor', amount: 0.02, target2: 'none', amount2: 0.02 },
+  { enabled: false, waveform: 'sine', period: 3000, phase: 0.25, hold: false, target: 'gap', amount: 0.006, target2: 'none', amount2: 0.006 },
 ];
 const lfoBase = {};
 function lfoWaveValue(lfo, tMs) {
@@ -334,6 +341,16 @@ function lfoTick(now) {
       const base = lfoBase[key] ?? active.ribbons[idx][lfo.target];
       active.ribbons[idx][lfo.target] = Math.max(0, base + v * lfo.amount);
     });
+    // Phase 3 AT3: drive a second parameter from the SAME oscillator phase
+    // (shared `v`), not a second independent LFO -- that's what makes this
+    // "one modulation source, two parameters" rather than just two LFOs.
+    if (lfo.target2 && lfo.target2 !== 'none') {
+      multiSelect.forEach(idx => {
+        const key2 = idx + ':' + lfo.target2;
+        const base2 = lfoBase[key2] ?? active.ribbons[idx][lfo.target2];
+        active.ribbons[idx][lfo.target2] = Math.max(0, base2 + v * lfo.amount2);
+      });
+    }
   });
   if (any) { render(); if (pane) pane.refresh(); }
   requestAnimationFrame(lfoTick);
@@ -996,16 +1013,28 @@ function buildModulationFolder() {
   });
   mf.addBinding(camUI, 'amount', { label: 'Camera amount', min: 0, max: 0.05, step: 0.002 }).on('change', (ev) => { camMod.amount = ev.value; });
 
+  // Phase 3 AT3: a second, optional target so one LFO can drive 2 params at
+  // once from the same oscillator phase -- 'none' keeps today's single-target
+  // behavior exactly as it was.
+  const target2Opts = { '— none —': 'none', ...paramOpts };
+  const captureLfoBase = (lfo) => {
+    multiSelect.forEach(idx => {
+      lfoBase[idx + ':' + lfo.target] = active.ribbons[idx][lfo.target];
+      if (lfo.target2 && lfo.target2 !== 'none') lfoBase[idx + ':' + lfo.target2] = active.ribbons[idx][lfo.target2];
+    });
+  };
   lfos.forEach((lfo, idx) => {
     const lf = mf.addFolder({ title: `LFO ${idx + 1}`, expanded: false });
     // founder S221: same multiSelect base-capture fix as audio/camera above.
-    lf.addBinding(lfo, 'enabled').on('change', () => { multiSelect.forEach(idx => { lfoBase[idx + ':' + lfo.target] = active.ribbons[idx][lfo.target]; }); });
+    lf.addBinding(lfo, 'enabled').on('change', () => captureLfoBase(lfo));
     lf.addBinding(lfo, 'waveform', { options: { sine: 'sine', square: 'square', triangle: 'triangle' } });
     lf.addBinding(lfo, 'period', { label: 'Period (ms)', min: 200, max: 8000, step: 100 });
     lf.addBinding(lfo, 'phase', { min: 0, max: 1, step: 0.01 });
     lf.addBinding(lfo, 'hold', { label: 'Hold (freeze)' });
     lf.addBinding(lfo, 'amount', { min: 0, max: 0.08, step: 0.002 });
-    lf.addBinding(lfo, 'target', { options: paramOpts }).on('change', () => { multiSelect.forEach(idx => { lfoBase[idx + ':' + lfo.target] = active.ribbons[idx][lfo.target]; }); });
+    lf.addBinding(lfo, 'target', { options: paramOpts }).on('change', () => captureLfoBase(lfo));
+    lf.addBinding(lfo, 'target2', { label: 'Also drives', options: target2Opts }).on('change', () => captureLfoBase(lfo));
+    lf.addBinding(lfo, 'amount2', { label: 'Amount 2', min: 0, max: 0.08, step: 0.002 });
   });
 }
 
@@ -1261,9 +1290,18 @@ canvas.addEventListener('pointerdown', (e) => {
     if (targetRibbon !== selectedRibbon) setPrimaryRibbon(targetRibbon);
     selectedPoint = { ribbon: targetRibbon, point: pi };
     const gp = active.ribbons[targetRibbon].points[pi];
+    // founder S221 (SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 3 AT1): a
+    // plain click used to nudge whatever point it landed near, because
+    // pointermove wrote x/y on ANY movement from the instant pointerdown
+    // fired -- no click-vs-drag distinction existed. `moved` stays false
+    // (and position writes stay suppressed) until the pointer actually
+    // travels past CLICK_THRESHOLD_PX; a click that never crosses it only
+    // ever selects, exactly like it already did before this drag object
+    // was created a few lines up.
     drags.set(e.pointerId, {
       type: 'point', ribbon: targetRibbon, point: pi,
       dx: gp.x * W - mx, dy: gp.y * HGT - my,
+      downX: mx, downY: my, moved: false,
     });
     canvas.setPointerCapture(e.pointerId);
     render();
@@ -1297,6 +1335,12 @@ canvas.addEventListener('pointermove', (e) => {
     return;
   }
   if (d && d.type === 'point') {
+    // founder S221, Phase 3 AT1: same threshold gate described where this
+    // drag object is created (pointerdown above) -- CLICK_THRESHOLD_PX of
+    // travel from the down position is what actually distinguishes "select"
+    // from "nudge," not just "did pointermove fire at all."
+    if (!d.moved && Math.hypot(mx - d.downX, my - d.downY) < CLICK_THRESHOLD_PX) return;
+    d.moved = true;
     active.ribbons[d.ribbon].points[d.point].x = (mx + d.dx) / W;
     active.ribbons[d.ribbon].points[d.point].y = (my + d.dy) / HGT;
     render();
@@ -1327,6 +1371,49 @@ canvas.addEventListener('pointerup', (e) => {
   render();
 });
 canvas.addEventListener('pointercancel', (e) => { drags.delete(e.pointerId); });
+
+// founder S221 (SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 3 AT2):
+// double-click always selects/retargets, with zero risk of ever nudging a
+// point -- unlike pointerdown's point-hit branch above, this never touches
+// `drags` at all, so there's no drag object for any stray pointer movement
+// between the two clicks to act on. Same targeting cascade (point hit on
+// the primary ribbon, then every other ribbon; segment hit as a fallback)
+// as pointerdown, but selection-only.
+canvas.addEventListener('dblclick', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+
+  let pi = hitTestPoint(mx, my, selectedRibbon);
+  let targetRibbon = selectedRibbon;
+  if (pi < 0) {
+    for (let idx = 0; idx < active.ribbons.length; idx++) {
+      if (idx === selectedRibbon) continue;
+      const hit = hitTestPoint(mx, my, idx);
+      if (hit >= 0) { targetRibbon = idx; pi = hit; break; }
+    }
+  }
+  if (pi >= 0) {
+    if (targetRibbon !== selectedRibbon) setPrimaryRibbon(targetRibbon);
+    selectedPoint = { ribbon: targetRibbon, point: pi };
+    render();
+    return;
+  }
+
+  let si = hitTestSegment(mx, my, selectedRibbon);
+  let segRibbon = selectedRibbon;
+  if (si < 0) {
+    for (let idx = 0; idx < active.ribbons.length; idx++) {
+      if (idx === selectedRibbon) continue;
+      const hit = hitTestSegment(mx, my, idx);
+      if (hit >= 0) { segRibbon = idx; si = hit; break; }
+    }
+  }
+  if (si >= 0) {
+    if (segRibbon !== selectedRibbon) setPrimaryRibbon(segRibbon);
+    selectedSegment = si;
+    render();
+  }
+});
 
 // #7: live subdivision of the selected segment via mouse-wheel.
 canvas.addEventListener('wheel', (e) => {
