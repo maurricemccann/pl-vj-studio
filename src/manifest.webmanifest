@@ -1,7 +1,7 @@
 {
-  "name": "PL VJ Studio Controller",
-  "short_name": "VJ Studio",
-  "description": "Wireless controller for PL VJ Studio",
+  "name": "PL Third Eye VJ Studio Controller",
+  "short_name": "Third Eye VJ",
+  "description": "Wireless controller for PL Third Eye VJ Studio",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

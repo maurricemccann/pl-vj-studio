@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "pl-vj-studio",
+  "productName": "PL Third Eye VJ Studio",
   "version": "0.1.0",
   "identifier": "com.maurr.pl-vj-studio",
   "build": {
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "PL VJ Studio",
+        "title": "PL Third Eye VJ Studio",
         "width": 800,
         "height": 600
       }
