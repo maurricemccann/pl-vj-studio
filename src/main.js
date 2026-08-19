@@ -452,6 +452,7 @@ function hexToRgbArr(hex) { const c = hexToRgb(hex); return [c.r, c.g, c.b]; }
 // materials add real cost of their own that a postFX-only number would miss
 // entirely (AT3 needs the STACKED total, not just the post-effects slice).
 let lastPostFxMs = 0, lastPostFxMode = null;
+let lastMaterialError = null;
 function postFX() {
   const anyAdj = adj.hue || adj.saturation || adj.brightness || adj.shadowsAmt || adj.midsAmt || adj.highsAmt || adj.curveEnabled || adj.gradientEnabled;
   const anyFx = fx.noise || fx.sharpen || fx.bloom || fx.glitch || fx.halftone || fx.opacity < 1 || fx.chromaticAberration;
@@ -1113,7 +1114,21 @@ function render() {
       // outline stroke a few lines down needs the plain silhouette path
       // rebuilt (unfilled) here, since "the same path is still current"
       // no longer holds after a material's own drawing.
-      drawRibbonMaterial(ctx, pl, wFn, r, r.tremor, r.closed);
+      // founder S221: a real device hit "the curve went blank" after picking
+      // a material -- if a material fn throws mid-draw, its own ctx.restore()
+      // never runs, leaving globalCompositeOperation/globalAlpha stuck in
+      // whatever state it was mid-pass for EVERY frame after, not just this
+      // one (render() reuses the same ctx every frame). try/catch + an
+      // explicit reset stops one bad material from silently blanking the
+      // whole canvas forever; the error itself surfaces in frame-stat below
+      // instead of vanishing into an uncaught exception no one can see.
+      try {
+        drawRibbonMaterial(ctx, pl, wFn, r, r.tremor, r.closed);
+      } catch (e) {
+        console.error('ribbon material draw failed:', r.material, e);
+        lastMaterialError = `${r.material}: ${e.message || e}`;
+      }
+      ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
       ctx.fillStyle = r.ink;
       H.ribbonPath(ctx, pl, wFn, 0, r.tremor, r.closed);
@@ -1236,7 +1251,8 @@ function render() {
   if (frameStatEl) {
     const totalMs = performance.now() - _renderT0;
     const postFxPart = lastPostFxMode ? ` · postFX ${lastPostFxMs.toFixed(1)}ms (${lastPostFxMode})` : '';
-    frameStatEl.textContent = `render ${totalMs.toFixed(1)}ms${postFxPart}${totalMs > 16.6 ? ' ⚠' : ''}`;
+    const errPart = lastMaterialError ? ` · ⚠ material error: ${lastMaterialError}` : '';
+    frameStatEl.textContent = `render ${totalMs.toFixed(1)}ms${postFxPart}${totalMs > 16.6 ? ' ⚠' : ''}${errPart}`;
   }
 }
 

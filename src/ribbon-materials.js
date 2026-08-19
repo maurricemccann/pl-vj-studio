@@ -34,12 +34,21 @@ function hash1(i, salt, tSeed) {
   return (v - Math.floor(v)) * 2 - 1;
 }
 
+// founder S221: "the curve went blank" after picking a material -- this dict
+// was {storedValue: DisplayLabel}, backwards from Tweakpane's actual
+// convention ({DisplayLabel: storedValue}, confirmed by this same file's own
+// BLEND_MODES). Selecting "Painterly" stored the label string 'Painterly'
+// (capital P) into r.material, which matches nothing in DRAW_FNS -- material
+// dispatch silently no-op'd and the plain-ribbon fill was never reached
+// either, so nothing drew at all. My own tests never caught this because
+// they set r.material directly in JS, bypassing the dropdown/options
+// mapping entirely.
 export const RIBBON_MATERIALS = {
-  ribbon: 'Ribbon (satin)',
-  painterly: 'Painterly',
-  spray: 'Spray-paint',
-  brush: 'Paintbrush',
-  fabric: 'Fabric',
+  'Ribbon (satin)': 'ribbon',
+  'Painterly': 'painterly',
+  'Spray-paint': 'spray',
+  'Paintbrush': 'brush',
+  'Fabric': 'fabric',
 };
 
 // painterly -- several offset, low-alpha passes of the same ribbon-strip
