@@ -4,9 +4,11 @@
 import { Pane } from './vendor/tweakpane.js';
 import { H } from './engine.js';
 import { PIECES } from './pieces.js';
+import { createPostFxGl } from './postfx-gl.js';
 
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
+const frameStatEl = document.getElementById('frame-stat');
 const pieceSelect = document.getElementById('piece-select');
 const ribbonListEl = document.getElementById('ribbon-list');
 const freqCanvas = document.getElementById('freq-meter');
@@ -30,6 +32,15 @@ if (isController) document.body.classList.add('controller-mode');
 // output for a screen capture, edits underneath are untouched.
 let presenting = false;
 
+// SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 1: the WebGL post-effects
+// compositor. Lazily created (first resize, once WebGL2 is known reachable)
+// and resized alongside the visible canvas. null on a machine/driver
+// without WebGL2 -- postFX() below falls back to the original CPU path
+// rather than breaking the app.
+let postFxGl = null;
+let postFxGlTried = false;
+let postFxGlError = null;
+
 function resize() {
   const dpr = window.devicePixelRatio || 1;
   if (isController) { W = 4; HGT = 4; } // no canvas UI on the phone -- keep the backing store trivial
@@ -40,6 +51,20 @@ function resize() {
   canvas.style.width = W + 'px';
   canvas.style.height = HGT + 'px';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  if (!isController) {
+    if (!postFxGlTried) {
+      postFxGlTried = true;
+      try { postFxGl = createPostFxGl(canvas.width, canvas.height); }
+      catch (e) {
+        console.error('postfx-gl init failed, falling back to CPU postFX:', e);
+        postFxGl = null;
+        postFxGlError = e.message || String(e);
+      }
+    } else if (postFxGl) {
+      postFxGl.resize(canvas.width, canvas.height);
+    }
+  }
 }
 window.addEventListener('resize', resize);
 resize();
@@ -179,7 +204,12 @@ function kfTick(now) {
   const elapsed = now - kfStart;
   let t = kfExtendedT(elapsed, kf.duration, kf.extend);
   if (kf.interp === 'ease') t = easeInOut(t);
-  active.ribbons[selectedRibbon][kf.param] = lerp(kf.a, kf.b, t);
+  const v = lerp(kf.a, kf.b, t);
+  // founder S221: was hardcoded to selectedRibbon only -- multiSelect already
+  // exists and is exactly what "all ribbons" vs "just this one" means
+  // elsewhere (buildRibbonFolder's bindMultiNumeric/bindMultiAbsolute), so
+  // reuse it here instead of a bespoke scope concept.
+  multiSelect.forEach(idx => { active.ribbons[idx][kf.param] = v; });
   render();
   if (pane) pane.refresh();
   if (kf.playing) kfRaf = requestAnimationFrame(kfTick);
@@ -229,8 +259,14 @@ function audioTick() {
   drawFreqMeter();
   if (audioMod.enabled) {
     const avg = audioBins.reduce((a, b) => a + b, 0) / audioBins.length / 255;
-    const base = audioMod.base[audioMod.param] ?? active.ribbons[selectedRibbon][audioMod.param];
-    active.ribbons[selectedRibbon][audioMod.param] = Math.max(0, base + avg * audioMod.amount);
+    // founder S221: was selectedRibbon-only -- base is now keyed per ribbon so
+    // each selected ribbon modulates around its own captured starting value,
+    // same multiSelect scope as the rest of the ribbon controls.
+    multiSelect.forEach(idx => {
+      const key = idx + ':' + audioMod.param;
+      const base = audioMod.base[key] ?? active.ribbons[idx][audioMod.param];
+      active.ribbons[idx][audioMod.param] = Math.max(0, base + avg * audioMod.amount);
+    });
     render();
     if (pane) pane.refresh();
   }
@@ -260,8 +296,12 @@ function camTick() {
     for (let i = 0; i < data.length; i += 4) sum += (data[i] + data[i + 1] + data[i + 2]) / 3;
     const avg = sum / (data.length / 4) / 255;
     if (camMod.enabled) {
-      const base = camMod.base[camMod.param] ?? active.ribbons[selectedRibbon][camMod.param];
-      active.ribbons[selectedRibbon][camMod.param] = Math.max(0, base + avg * camMod.amount);
+      // founder S221: same multiSelect fix as audioTick above.
+      multiSelect.forEach(idx => {
+        const key = idx + ':' + camMod.param;
+        const base = camMod.base[key] ?? active.ribbons[idx][camMod.param];
+        active.ribbons[idx][camMod.param] = Math.max(0, base + avg * camMod.amount);
+      });
       render();
       if (pane) pane.refresh();
     }
@@ -286,9 +326,13 @@ function lfoTick(now) {
   lfos.forEach(lfo => {
     if (!lfo.enabled) return;
     any = true;
-    const base = lfoBase[lfo.target] ?? active.ribbons[selectedRibbon][lfo.target];
     const v = lfoWaveValue(lfo, now);
-    active.ribbons[selectedRibbon][lfo.target] = Math.max(0, base + v * lfo.amount);
+    // founder S221: same multiSelect fix as audioTick/camTick above.
+    multiSelect.forEach(idx => {
+      const key = idx + ':' + lfo.target;
+      const base = lfoBase[key] ?? active.ribbons[idx][lfo.target];
+      active.ribbons[idx][lfo.target] = Math.max(0, base + v * lfo.amount);
+    });
   });
   if (any) { render(); if (pane) pane.refresh(); }
   requestAnimationFrame(lfoTick);
@@ -384,11 +428,34 @@ function buildCurveLUT(points) {
 }
 function hexToRgbArr(hex) { const c = hexToRgb(hex); return [c.r, c.g, c.b]; }
 
+// SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 1: postFX() now dispatches to
+// the WebGL compositor (one combined shader pass) when available, falling
+// back to the original per-effect CPU loops below (postFXCpu) only if
+// WebGL2 failed to initialize. AT1's frame-time readout wraps whichever
+// path actually ran, so the number is honest either way.
 function postFX() {
   const anyAdj = adj.hue || adj.saturation || adj.brightness || adj.shadowsAmt || adj.midsAmt || adj.highsAmt || adj.curveEnabled || adj.gradientEnabled;
   const anyFx = fx.noise || fx.sharpen || fx.bloom || fx.glitch || fx.halftone || fx.opacity < 1 || fx.chromaticAberration;
-  if (!anyAdj && !anyFx) return;
+  if (!anyAdj && !anyFx) { if (frameStatEl) frameStatEl.textContent = ''; return; }
 
+  const t0 = performance.now();
+
+  if (postFxGl) {
+    const curveLUT = adj.curveEnabled ? buildCurveLUT(adj.curvePoints) : null;
+    postFxGl.render(canvas, adj, fx, curveLUT, active.ground, hexToRgbArr);
+    ctx.drawImage(postFxGl.canvas, 0, 0);
+  } else {
+    postFXCpu();
+  }
+
+  if (frameStatEl) {
+    const ms = performance.now() - t0;
+    const mode = postFxGl ? 'GL' : (postFxGlError ? `CPU fallback: ${postFxGlError}` : 'CPU');
+    frameStatEl.textContent = `postFX ${ms.toFixed(1)}ms (${mode})${ms > 16.6 ? ' ⚠' : ''}`;
+  }
+}
+
+function postFXCpu() {
   const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const d = img.data;
   const curveLUT = adj.curveEnabled ? buildCurveLUT(adj.curvePoints) : null;
@@ -842,7 +909,10 @@ function buildCurveFolder() {
   const cf = pane.addFolder({ title: 'Curve editing', expanded: false });
   const r = active.ribbons[selectedRibbon];
   r.closed = !!r.closed;
-  cf.addBinding(r, 'closed', { label: 'Closed loop' }).on('change', () => { render(); scheduleSync(); });
+  // founder S221: was bound straight to `r` (selectedRibbon only) -- this is
+  // an absolute-set boolean, same shape as color/blend in buildRibbonFolder,
+  // so it reuses bindMultiAbsolute instead of a bespoke direct binding.
+  bindMultiAbsolute(cf, 'closed', { label: 'Closed loop' });
   const sketchBtn = cf.addButton({ title: sketchMode.active ? 'Stop sketching' : 'Sketch new ribbon' });
   sketchBtn.on('click', () => {
     sketchMode.active = !sketchMode.active;
@@ -895,11 +965,12 @@ function buildModulationFolder() {
   });
   mf.addBinding(audioUI, 'enabled', { label: 'Audio drives param' }).on('change', (ev) => {
     audioMod.enabled = ev.value;
-    if (ev.value) audioMod.base[audioUI.param] = active.ribbons[selectedRibbon][audioUI.param];
+    // founder S221: capture a base per ribbon in multiSelect, not just selectedRibbon.
+    if (ev.value) multiSelect.forEach(idx => { audioMod.base[idx + ':' + audioUI.param] = active.ribbons[idx][audioUI.param]; });
   });
   mf.addBinding(audioUI, 'param', { label: 'Audio target', options: paramOpts }).on('change', (ev) => {
     audioMod.param = ev.value;
-    audioMod.base[ev.value] = active.ribbons[selectedRibbon][ev.value];
+    multiSelect.forEach(idx => { audioMod.base[idx + ':' + ev.value] = active.ribbons[idx][ev.value]; });
   });
   mf.addBinding(audioUI, 'amount', { label: 'Audio amount', min: 0, max: 0.15, step: 0.005 }).on('change', (ev) => { audioMod.amount = ev.value; });
 
@@ -909,23 +980,25 @@ function buildModulationFolder() {
   });
   mf.addBinding(camUI, 'enabled', { label: 'Camera drives param' }).on('change', (ev) => {
     camMod.enabled = ev.value;
-    if (ev.value) camMod.base[camUI.param] = active.ribbons[selectedRibbon][camUI.param];
+    // founder S221: same multiSelect base-capture fix as audio above.
+    if (ev.value) multiSelect.forEach(idx => { camMod.base[idx + ':' + camUI.param] = active.ribbons[idx][camUI.param]; });
   });
   mf.addBinding(camUI, 'param', { label: 'Camera target', options: paramOpts }).on('change', (ev) => {
     camMod.param = ev.value;
-    camMod.base[ev.value] = active.ribbons[selectedRibbon][ev.value];
+    multiSelect.forEach(idx => { camMod.base[idx + ':' + ev.value] = active.ribbons[idx][ev.value]; });
   });
   mf.addBinding(camUI, 'amount', { label: 'Camera amount', min: 0, max: 0.05, step: 0.002 }).on('change', (ev) => { camMod.amount = ev.value; });
 
   lfos.forEach((lfo, idx) => {
     const lf = mf.addFolder({ title: `LFO ${idx + 1}`, expanded: false });
-    lf.addBinding(lfo, 'enabled').on('change', () => { lfoBase[lfo.target] = active.ribbons[selectedRibbon][lfo.target]; });
+    // founder S221: same multiSelect base-capture fix as audio/camera above.
+    lf.addBinding(lfo, 'enabled').on('change', () => { multiSelect.forEach(idx => { lfoBase[idx + ':' + lfo.target] = active.ribbons[idx][lfo.target]; }); });
     lf.addBinding(lfo, 'waveform', { options: { sine: 'sine', square: 'square', triangle: 'triangle' } });
     lf.addBinding(lfo, 'period', { label: 'Period (ms)', min: 200, max: 8000, step: 100 });
     lf.addBinding(lfo, 'phase', { min: 0, max: 1, step: 0.01 });
     lf.addBinding(lfo, 'hold', { label: 'Hold (freeze)' });
     lf.addBinding(lfo, 'amount', { min: 0, max: 0.08, step: 0.002 });
-    lf.addBinding(lfo, 'target', { options: paramOpts }).on('change', () => { lfoBase[lfo.target] = active.ribbons[selectedRibbon][lfo.target]; });
+    lf.addBinding(lfo, 'target', { options: paramOpts }).on('change', () => { multiSelect.forEach(idx => { lfoBase[idx + ':' + lfo.target] = active.ribbons[idx][lfo.target]; }); });
   });
 }
 

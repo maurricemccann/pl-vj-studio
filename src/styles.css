@@ -20,6 +20,11 @@ html, body {
 }
 #wordmark strong { color: #1a1510; font-weight: 500; }
 
+#frame-stat {
+  padding: 0 12px 8px; font-family: 'DM Sans', system-ui, sans-serif;
+  font-size: 10px; letter-spacing: 0.06em; color: rgba(138,114,53,0.75);
+}
+
 #piece-select {
   margin: 8px 12px 12px; padding: 8px; background: #f5efe2; color: #1a1510;
   border: 1px solid rgba(160,140,110,0.35); border-radius: 6px; font-size: 13px;
