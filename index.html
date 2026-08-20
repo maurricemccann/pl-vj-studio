@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PL Third Eye VJ Studio</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+  <link rel="stylesheet" href="/src/panel/panel.css" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#faf7f0" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="canvas"></canvas>
+    <button id="present-toggle" type="button" title="Presentation / recording mode (F)">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M4 9V5a1 1 0 0 1 1-1h4M20 9V5a1 1 0 0 0-1-1h-4M4 15v4a1 1 0 0 0 1 1h4M20 15v4a1 1 0 0 1-1 1h-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <div id="sidebar">
+      <div id="wordmark"><strong>PSYCHED LUXURIES</strong> · Third Eye VJ Studio</div>
+      <div id="frame-stat" title="frame time (ms)"></div>
+      <div id="controller-url"></div>
+      <select id="piece-select"></select>
+
+      <!-- SPEC — PL THIRD EYE VJ STUDIO SETTINGS PANEL REDESIGN, Phase A:
+           React owns the nav shell (Ribbon List + icon-tab rail + property
+           view) from here down -- replaces the old plain-DOM #ribbon-list
+           and Tweakpane's #panel. Everything above (piece-select, frame-stat)
+           and everything below (pads/curve-graph/freq-meter -- Phase A
+           out-of-scope, untouched direct-manipulation controls) stays
+           exactly as it was. -->
+      <div id="react-root"></div>
+
+      <div id="pads" class="module">
+        <div class="pad-block">
+          <label>Width x Taper</label>
+          <div class="pad" id="pad-width-taper"><div class="pad-dot"></div></div>
+        </div>
+        <div class="pad-block">
+          <label>Gap x Tremor</label>
+          <div class="pad" id="pad-gap-tremor"><div class="pad-dot"></div></div>
+        </div>
+      </div>
+
+      <div class="pad-block curve-block module">
+        <label>Curve (click to add a point, drag to shape)</label>
+        <canvas id="curve-graph" width="248" height="140"></canvas>
+      </div>
+
+      <canvas id="freq-meter" width="256" height="48"></canvas>
+
+      <p class="hint">Drag the white handles on canvas to reshape the selected ribbon's spline. Clicking a different ribbon's curve targets it for editing. Hover a segment to highlight it, click to select, wheel to add/remove points. Select a point: H for bezier handles, K to align, T to toggle tied/untied, W to reset its width handle. Drag the orange width handle to vary thickness at that point. F (or the button, top-right) toggles presentation/recording mode.</p>
+    </div>
+  </div>
+  <script type="module" src="/src/panel/main.jsx"></script>
+</body>
+</html>

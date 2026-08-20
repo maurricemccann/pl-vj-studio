@@ -1,0 +1,82 @@
+/* SPEC — PL THIRD EYE VJ STUDIO SETTINGS PANEL REDESIGN, Phase A: the new
+   nav shell -- persistent Ribbon List -> icon-tab rail -> single-category
+   property view with a search box. Extends the existing cream/gold "module"
+   language from styles.css rather than inventing a new one. Desktop only --
+   the phone/controller never loads this file. */
+
+/* #sidebar (styles.css) is itself a column flexbox with a fixed 100vh height
+   and overflow-y:auto -- ITS content (pads/curve-graph/freq-meter/hint) can
+   already exceed 100vh on its own. Giving #react-root `flex:1` (flex-basis:0%)
+   left it zero free space to grow into once its siblings' natural heights
+   were counted, collapsing it to 0px while its content still painted via
+   overflow -- the exact "pads overlapping the ribbon list" bug caught by the
+   house "render it, don't just read the code" rule. Fix: size to content like
+   every other sidebar child, and let the whole #sidebar keep scrolling as one
+   long column, same as it always has. */
+#react-root { display: block; }
+.pl-app-root { display: flex; flex-direction: column; }
+
+/* ---- Ribbon List (Blender-outliner role) ---- */
+.pl-ribbon-list-wrap { margin: 0 12px 12px; padding: 12px; background: #faf7f0; border: 1px solid rgba(160,140,110,0.22); border-radius: 9px; box-shadow: 0 1px 0 rgba(255,255,255,0.6) inset, 0 2px 6px rgba(26,21,16,0.05); }
+.pl-ribbon-list { display: flex; flex-direction: column; gap: 2px; max-height: 160px; overflow-y: auto; flex-shrink: 0; margin-bottom: 9px; }
+.pl-ribbon-row { position: relative; display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 9px; border-radius: 4px; font-size: 12px; cursor: pointer; border: 1px solid transparent; transition: background 0.15s ease; }
+.pl-ribbon-row:hover { background: rgba(160,140,110,0.1); }
+.pl-ribbon-row.primary { border-color: #c9a84c; background: rgba(201,168,76,0.14); font-weight: 600; }
+.pl-ribbon-row.primary::before { content: ''; position: absolute; left: 0; top: 3px; bottom: 3px; width: 3px; border-radius: 2px; background: #c9a84c; }
+.pl-ribbon-row.in-group:not(.primary) { background: rgba(201,168,76,0.06); }
+.pl-ribbon-swatch { width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgba(26,21,16,0.3); flex-shrink: 0; box-shadow: inset 0 -1px 1px rgba(0,0,0,0.25), inset 0 1px 1px rgba(255,255,255,0.4); }
+.pl-ribbon-label { flex: 1; }
+.pl-ribbon-list-actions { display: flex; gap: 6px; }
+.pl-ribbon-list-actions button { flex: 1; font-size: 11px; padding: 5px 4px; background: #ece2cc; border: 1px solid rgba(160,140,110,0.35); border-radius: 5px; color: #1a1510; cursor: pointer; font-family: inherit; box-shadow: 0 1px 1px rgba(255,255,255,0.5) inset; transition: background 0.15s ease; }
+.pl-ribbon-list-actions button:hover { background: #e4d5ac; }
+
+/* ---- Nav body: icon rail + property view ---- */
+.pl-nav-body { display: flex; margin: 0 12px 12px; }
+
+.pl-tab-rail { display: flex; flex-direction: column; gap: 2px; flex-shrink: 0; width: 52px; }
+.pl-tab-btn { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 2px; border: 1px solid transparent; background: transparent; border-radius: 8px 0 0 8px; color: #8a7235; cursor: pointer; font-family: inherit; }
+.pl-tab-btn:hover { background: rgba(160,140,110,0.1); color: #1a1510; }
+.pl-tab-btn.active { background: #faf7f0; border-color: rgba(160,140,110,0.22); border-right-color: #faf7f0; color: #1a1510; position: relative; z-index: 1; }
+.pl-tab-label { font-size: 8px; letter-spacing: 0.04em; text-transform: uppercase; }
+
+.pl-property-view { flex: 1; min-width: 0; background: #faf7f0; border: 1px solid rgba(160,140,110,0.22); border-radius: 0 9px 9px 9px; box-shadow: 0 1px 0 rgba(255,255,255,0.6) inset, 0 2px 6px rgba(26,21,16,0.05); padding: 10px; display: flex; flex-direction: column; gap: 8px; max-height: 46vh; overflow-y: auto; }
+
+.pl-search { padding: 6px 9px; background: #fdf9f1; color: #1a1510; border: 1px solid rgba(160,140,110,0.35); border-radius: 6px; font-size: 12px; font-family: inherit; }
+.pl-search:focus { outline: none; border-color: #c9a84c; }
+
+.pl-panel-title { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: #8a7235; font-weight: 600; margin-bottom: 2px; }
+.pl-placeholder p { font-size: 12px; color: #6b5d48; line-height: 1.5; }
+.pl-placeholder-note { opacity: 0.75; font-style: italic; }
+
+/* ---- Slider (per-parameter drag sensitivity, Shift = fine-adjust,
+   dbl-click number = type exact value, wheel = one step) ---- */
+/* min-width:0 on the 1fr track: CSS Grid's implicit track minimum is
+   min-content, not 0 -- without this override a text input's default
+   ~20-character intrinsic width forces the whole row (and the 280px
+   sidebar) to overflow horizontally. Same fix applied to color/dropdown
+   rows below. */
+.pl-slider-row { display: grid; grid-template-columns: 84px 1fr 46px; align-items: center; gap: 8px; }
+.pl-slider-label { font-size: 11px; color: #6b5d48; }
+.pl-slider-track { position: relative; height: 18px; min-width: 0; background: #f5efe2; border: 1px solid rgba(160,140,110,0.35); border-radius: 5px; cursor: ew-resize; touch-action: none; box-shadow: inset 0 2px 4px rgba(26,21,16,0.08); overflow: hidden; }
+.pl-slider-track.dragging { border-color: #c9a84c; }
+.pl-slider-fill { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(201,168,76,0.4); pointer-events: none; }
+.pl-slider-value { font-size: 11px; text-align: right; color: #1a1510; font-variant-numeric: tabular-nums; cursor: text; }
+.pl-slider-input { width: 46px; font-size: 11px; text-align: right; padding: 2px 4px; border: 1px solid #c9a84c; border-radius: 4px; background: #fdf9f1; color: #1a1510; font-family: inherit; }
+
+/* ---- Color field ---- */
+.pl-color-row { display: grid; grid-template-columns: 84px 24px minmax(66px, 1fr); align-items: center; gap: 8px; }
+.pl-color-swatch { width: 24px; height: 20px; padding: 0; border: 1px solid rgba(160,140,110,0.35); border-radius: 4px; background: none; cursor: pointer; }
+.pl-color-hex { width: 100%; min-width: 0; box-sizing: border-box; font-size: 11px; padding: 3px 6px; border: 1px solid rgba(160,140,110,0.35); border-radius: 4px; background: #fdf9f1; color: #1a1510; font-family: inherit; }
+
+/* ---- Dropdown (custom-styled, not the raw <select>) ---- */
+.pl-dropdown-row { display: grid; grid-template-columns: 84px 1fr; align-items: center; gap: 8px; }
+.pl-dropdown { position: relative; min-width: 0; }
+.pl-dropdown-trigger { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 5px 8px; font-size: 11px; background: #fdf9f1; border: 1px solid rgba(160,140,110,0.35); border-radius: 5px; color: #1a1510; cursor: pointer; font-family: inherit; }
+.pl-dropdown-trigger:hover { background: #f5efe2; }
+.pl-dropdown-menu { position: absolute; top: calc(100% + 2px); left: 0; right: 0; z-index: 20; background: #fdf9f1; border: 1px solid rgba(160,140,110,0.35); border-radius: 6px; box-shadow: 0 4px 14px rgba(26,21,16,0.18); max-height: 220px; overflow-y: auto; }
+.pl-dropdown-item { padding: 6px 9px; font-size: 11px; cursor: pointer; }
+.pl-dropdown-item:hover { background: rgba(201,168,76,0.18); }
+.pl-dropdown-item.selected { background: rgba(201,168,76,0.3); font-weight: 600; }
+
+/* ---- Checkbox row (Glow) ---- */
+.pl-checkbox-row { display: grid; grid-template-columns: 84px 1fr; align-items: center; gap: 8px; cursor: pointer; }
