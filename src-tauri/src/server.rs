@@ -112,6 +112,37 @@ pub async fn start() {
         .route("/main.js", get(|| async { js(include_str!("../../src/main.js")) }))
         .route("/engine.js", get(|| async { js(include_str!("../../src/engine.js")) }))
         .route("/pieces.js", get(|| async { js(include_str!("../../src/pieces.js")) }))
+        // Pre-existing bug found live-testing the phone/controller path for
+        // Phase A (house rule: render it, don't just read the code) -- these
+        // two routes were never added when Phase 2 shipped ribbon-materials.js
+        // and postfx-gl.js (confirmed via `git show HEAD` -- absent in the
+        // last committed server.rs too, not introduced by this session). Every
+        // static import in an ES module must resolve or the WHOLE module
+        // fails to execute, so main.js's `import ... from './ribbon-materials.js'`
+        // 503ing silently blanked the entire phone controller, not just
+        // materials -- fixed here since it blocks this phase's own required
+        // "phone still works" verification and touches the same file/pattern
+        // already in this phase's change surface.
+        .route(
+            "/postfx-gl.js",
+            get(|| async { js(include_str!("../../src/postfx-gl.js")) }),
+        )
+        .route(
+            "/ribbon-materials.js",
+            get(|| async { js(include_str!("../../src/ribbon-materials.js")) }),
+        )
+        // SPEC — PL THIRD EYE VJ STUDIO SETTINGS PANEL REDESIGN, Phase A: the
+        // extracted shared core, now 2 files -- each needs its own
+        // include_str!+.route() pair here (this file's own header comment
+        // flagged that a multi-file split wouldn't be a single 2-line repoint,
+        // and it wasn't). main.js imports these as relative paths
+        // (./core/store.js, ./core/interactions.js), so the phone's browser
+        // resolves them to exactly these routes.
+        .route("/core/store.js", get(|| async { js(include_str!("../../src/core/store.js")) }))
+        .route(
+            "/core/interactions.js",
+            get(|| async { js(include_str!("../../src/core/interactions.js")) }),
+        )
         .route("/styles.css", get(|| async { css(include_str!("../../src/styles.css")) }))
         .route(
             "/vendor/tweakpane.js",

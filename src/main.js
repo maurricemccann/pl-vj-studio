@@ -1,785 +1,54 @@
+// SPEC — PL THIRD EYE VJ STUDIO SETTINGS PANEL REDESIGN, Phase A: this file
+// is now the phone/Tailscale controller entry specifically -- still the
+// exact file src-tauri/src/server.rs embeds via include_str! and serves raw
+// to a phone opening ?controller (or a bare Tailscale/LAN URL), unchanged in
+// that role. The desktop app no longer loads this file at all: tauri.conf.json
+// now points frontendDist at the Vite build of src/panel/main.jsx, which
+// imports the same core/store.js + core/interactions.js this file does, so
+// both surfaces read/drive one shared state model (Phase A's load-bearing
+// constraint -- see the SPEC's "phone/Tailscale controller conflict" note).
+//
 // Vendored into src/ (not imported from node_modules) -- Tauri's asset
 // server only serves files inside frontendDist ("../src"), so a path that
 // escapes it 404s silently and the whole module throws on import.
 import { Pane } from './vendor/tweakpane.js';
-import { H } from './engine.js';
-import { PIECES } from './pieces.js';
-import { createPostFxGl } from './postfx-gl.js';
-import { drawRibbonMaterial, RIBBON_MATERIALS } from './ribbon-materials.js';
+import {
+  state, PIECES, RIBBON_MATERIALS, BLEND_MODES, NUMERIC_DEFAULTS, SKIP_KEYS,
+  isController, loadPiece, render, setPrimaryRibbon, scheduleSync,
+  shuffleSelected, snapshotPreset, morphTo, kfPlay, kfStop,
+  startAudio, startCamera, connectWS, setPaneRefreshHook, setRemoteApplyHook,
+  buildCurveLUT, lfoBase,
+} from './core/store.js';
+import { initInteractions, drawCurveGraph } from './core/interactions.js';
 
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
-const frameStatEl = document.getElementById('frame-stat');
 const pieceSelect = document.getElementById('piece-select');
 const ribbonListEl = document.getElementById('ribbon-list');
-const freqCanvas = document.getElementById('freq-meter');
-const freqCtx = freqCanvas.getContext('2d');
-let W, HGT;
 
-// Wireless controller (#215): the same HTML/JS served two ways -- the Tauri
-// desktop webview (full app, renders the canvas) and a phone opening
-// http://<desktop-lan-ip>:8917 in a plain browser (panel only, no canvas, no
-// curve/bezier/width-handle geometry editing -- see the networking block near
-// the end of this file for the sync protocol). Detected by Tauri's own
-// injected API, not a URL param -- a bookmarked/PWA'd bare URL on the phone
-// must land in controller mode with no query string required (S215: typing
-// the bare Tailscale IP loaded full desktop mode instead, since only the
-// param was checked). `?controller` still works too, as a manual override.
-const isController = !window.__TAURI__ || new URLSearchParams(location.search).has('controller');
 if (isController) document.body.classList.add('controller-mode');
 
-// Presentation/recording mode (#F): sidebar hidden, canvas fills the window,
-// editor chrome (handles/segment highlights) skipped in render() -- clean
-// output for a screen capture, edits underneath are untouched.
-let presenting = false;
-
-// SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 1: the WebGL post-effects
-// compositor. Lazily created (first resize, once WebGL2 is known reachable)
-// and resized alongside the visible canvas. null on a machine/driver
-// without WebGL2 -- postFX() below falls back to the original CPU path
-// rather than breaking the app.
-let postFxGl = null;
-let postFxGlTried = false;
-let postFxGlError = null;
-
-function resize() {
-  const dpr = window.devicePixelRatio || 1;
-  if (isController) { W = 4; HGT = 4; } // no canvas UI on the phone -- keep the backing store trivial
-  else W = presenting ? window.innerWidth : window.innerWidth - 280; // leave room for the panel
-  if (!isController) HGT = window.innerHeight;
-  canvas.width = W * dpr;
-  canvas.height = HGT * dpr;
-  canvas.style.width = W + 'px';
-  canvas.style.height = HGT + 'px';
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-  if (!isController) {
-    if (!postFxGlTried) {
-      postFxGlTried = true;
-      try { postFxGl = createPostFxGl(canvas.width, canvas.height); }
-      catch (e) {
-        console.error('postfx-gl init failed, falling back to CPU postFX:', e);
-        postFxGl = null;
-        postFxGlError = e.message || String(e);
-      }
-    } else if (postFxGl) {
-      postFxGl.resize(canvas.width, canvas.height);
-    }
-  }
-}
-window.addEventListener('resize', resize);
-resize();
-
-// Deep-clone the active piece so edits (dragging, sliders) never mutate the
-// source library -- "reset" just re-clones from PIECES.
-let active = null;
-// selectedRibbon = the single "primary" target: curve editing (points/handles),
-// Animation/Modulation folders, the pads. multiSelect = the group that Ribbon
-// params (color/width/taper/tremor/gap/blend/outline) batch-applies to -- the
-// "ribbons as a whole" tier (founder S215): numeric params apply as a delta so
-// each ribbon's own relative variation survives a group edit; color/blend/glow
-// apply as an absolute set. A single-member group is just individual editing,
-// unchanged from before.
-let selectedRibbon = 0;
-let multiSelect = new Set([0]);
 let pane = null;
 let ribbonIndexObj = { value: 0 };
 
-// Curve-editing selection state (Group B) -- persists across mouse-up so a
-// point/segment stays addressable for keyboard shortcuts and the wheel.
-let selectedPoint = null;   // { ribbon, point }
-let selectedSegment = null; // index into the control polygon
-let hoverSegment = null;
-let lastHandleSide = 'hOut';
-const drags = new Map();    // pointerId -> {type:'point'|'handle'|'sketch', ...} -- multi-touch (Group D #21)
-// founder S221, Phase 3 AT1: pointer travel under this, between down and up,
-// counts as a click (select only) not a drag (moves the point).
-const CLICK_THRESHOLD_PX = 5;
-const sketchMode = { active: false, stroke: [] };
-
-function loadPiece(id) {
-  kfStop();
-  if (morphRaf) cancelAnimationFrame(morphRaf);
-  presetA = null; presetB = null;
-  selectedPoint = null; selectedSegment = null; hoverSegment = null;
-  sketchMode.active = false; sketchMode.stroke = [];
-  drags.clear();
-  const src = PIECES.find(p => p.id === id);
-  active = JSON.parse(JSON.stringify(src));
-  // Default the group-editable fields on every ribbon up front (not just the
-  // primary, as before) -- a multi-select batch edit can now touch a ribbon
-  // that's never been opened in the "Ribbon params" folder yet.
-  active.ribbons.forEach(r => {
-    r.outlineWidth = r.outlineWidth ?? 0;
-    r.outlineColor = r.outlineColor || '#1a1510';
-    r.blend = r.blend || 'source-over';
-    r.closed = !!r.closed;
-  });
-  selectedRibbon = 0;
-  multiSelect = new Set([0]);
-  buildPane();
-  renderRibbonList();
-  render();
-  scheduleSync();
-}
-
 // ============================================================
-// Animation core (Group A): shared lerp/color helpers used by
-// preset morphing, the keyframe demo, shuffle, and modulation.
+// Ribbon list -- the group-selection UI (plain DOM, not Tweakpane). The
+// phone/controller keeps this exact lightweight list (SPEC load-bearing
+// premise 3); the desktop React entry replaces it with RibbonList.jsx.
 // ============================================================
-function lerp(a, b, t) { return a + (b - a) * t; }
-function easeInOut(t) { return t * t * (3 - 2 * t); }
-function hexToRgb(hex) {
-  const h = hex.replace('#', '');
-  return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) };
-}
-function rgbToHex(r, g, b) {
-  return '#' + [r, g, b].map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
-}
-function lerpColor(a, b, t) {
-  const pa = hexToRgb(a), pb = hexToRgb(b);
-  return rgbToHex(lerp(pa.r, pb.r, t), lerp(pa.g, pb.g, t), lerp(pa.b, pb.b, t));
-}
-function hslToHex(h, s, l) {
-  s /= 100; l /= 100;
-  const k = n => (n + h / 30) % 12;
-  const a = s * Math.min(l, 1 - l);
-  const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
-  return rgbToHex(f(0) * 255, f(8) * 255, f(4) * 255);
-}
-
-// ---- Preset A/B morph (#2) ----
-let presetA = null, presetB = null, morphRaf = null;
-function snapshotPreset() { return JSON.parse(JSON.stringify(active.ribbons)); }
-function morphTo(target, durationMs, useEase) {
-  if (!target) return;
-  if (morphRaf) cancelAnimationFrame(morphRaf);
-  const start = snapshotPreset();
-  const t0 = performance.now();
-  function tick(now) {
-    const raw = Math.min(1, (now - t0) / durationMs);
-    const t = useEase ? easeInOut(raw) : raw;
-    active.ribbons.forEach((r, i) => {
-      const s = start[i], e = target[i];
-      if (!e) return;
-      r.width = lerp(s.width, e.width, t);
-      r.taper = lerp(s.taper, e.taper, t);
-      r.tremor = lerp(s.tremor, e.tremor, t);
-      r.gap = lerp(s.gap, e.gap, t);
-      r.ink = lerpColor(s.ink, e.ink, t);
-      if (s.core && e.core) r.core = lerpColor(s.core, e.core, t);
-    });
-    render();
-    if (pane) pane.refresh();
-    if (raw < 1) morphRaf = requestAnimationFrame(tick);
-  }
-  morphRaf = requestAnimationFrame(tick);
-}
-
-// ---- Shuffle (#5) ----
-function randomColor() { return hslToHex(Math.random() * 360, 55 + Math.random() * 25, 40 + Math.random() * 20); }
-function shuffleSelected() {
-  const jitter = (v, amt, min, max) => Math.max(min, Math.min(max, v + (Math.random() * 2 - 1) * amt));
-  multiSelect.forEach(idx => {
-    const r = active.ribbons[idx];
-    if (!r) return;
-    r.width = jitter(r.width, 0.03, 0.01, 0.2);
-    r.taper = jitter(r.taper, 0.04, 0.02, 0.3);
-    r.tremor = jitter(r.tremor, 0.015, 0, 0.1);
-    r.gap = jitter(r.gap, 0.004, 0, 0.03);
-    r.ink = randomColor();
-  });
-  render();
-  if (pane) pane.refresh();
-}
-
-// ---- Keyframe demo (#1): one parameter, A/B values, duration,
-// interpolation, Extend mode for time outside the keyframed range ----
-const kf = { param: 'tremor', a: 0, b: 0.05, duration: 2000, interp: 'ease', extend: 'loop', playing: false };
-let kfRaf = null, kfStart = 0;
-function kfExtendedT(elapsed, duration, mode) {
-  const raw = elapsed / duration;
-  if (mode === 'hold') return Math.min(1, raw);
-  if (mode === 'loop') return raw % 1;
-  const cyc = raw % 2; // mirror: triangle wave 0->1->0
-  return cyc <= 1 ? cyc : 2 - cyc;
-}
-function kfTick(now) {
-  const elapsed = now - kfStart;
-  let t = kfExtendedT(elapsed, kf.duration, kf.extend);
-  if (kf.interp === 'ease') t = easeInOut(t);
-  const v = lerp(kf.a, kf.b, t);
-  // founder S221: was hardcoded to selectedRibbon only -- multiSelect already
-  // exists and is exactly what "all ribbons" vs "just this one" means
-  // elsewhere (buildRibbonFolder's bindMultiNumeric/bindMultiAbsolute), so
-  // reuse it here instead of a bespoke scope concept.
-  multiSelect.forEach(idx => { active.ribbons[idx][kf.param] = v; });
-  render();
-  if (pane) pane.refresh();
-  if (kf.playing) kfRaf = requestAnimationFrame(kfTick);
-}
-function kfPlay() {
-  if (kf.playing) return;
-  kf.playing = true;
-  kfStart = performance.now();
-  kfRaf = requestAnimationFrame(kfTick);
-}
-function kfStop() {
-  kf.playing = false;
-  if (kfRaf) cancelAnimationFrame(kfRaf);
-}
-
-// ============================================================
-// Modulation (Group C): audio-FFT (#14/#15), camera luminance (#18),
-// dual LFOs (#17) -- each drives one ribbon parameter on the selected
-// ribbon, modulating around a captured base value.
-// ============================================================
-const audioMod = { enabled: false, param: 'tremor', amount: 0.06, base: {} };
-let audioCtx = null, analyser = null, audioBins = null;
-async function startAudio() {
-  if (audioCtx) return;
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const src = audioCtx.createMediaStreamSource(stream);
-  analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 256;
-  src.connect(analyser);
-  audioBins = new Uint8Array(analyser.frequencyBinCount);
-  requestAnimationFrame(audioTick);
-}
-function drawFreqMeter() {
-  if (!audioBins) return;
-  freqCtx.clearRect(0, 0, freqCanvas.width, freqCanvas.height);
-  freqCtx.fillStyle = '#c9a84c';
-  const barW = freqCanvas.width / audioBins.length;
-  for (let i = 0; i < audioBins.length; i++) {
-    const h = (audioBins[i] / 255) * freqCanvas.height;
-    freqCtx.fillRect(i * barW, freqCanvas.height - h, Math.max(1, barW - 1), h);
-  }
-}
-function audioTick() {
-  if (!analyser) return;
-  analyser.getByteFrequencyData(audioBins);
-  drawFreqMeter();
-  if (audioMod.enabled) {
-    const avg = audioBins.reduce((a, b) => a + b, 0) / audioBins.length / 255;
-    // founder S221: was selectedRibbon-only -- base is now keyed per ribbon so
-    // each selected ribbon modulates around its own captured starting value,
-    // same multiSelect scope as the rest of the ribbon controls.
-    multiSelect.forEach(idx => {
-      const key = idx + ':' + audioMod.param;
-      const base = audioMod.base[key] ?? active.ribbons[idx][audioMod.param];
-      active.ribbons[idx][audioMod.param] = Math.max(0, base + avg * audioMod.amount);
-    });
-    render();
-    if (pane) pane.refresh();
-  }
-  requestAnimationFrame(audioTick);
-}
-
-const camMod = { enabled: false, param: 'gap', amount: 0.01, base: {} };
-let camVideo = null, camSampleCtx = null;
-async function startCamera() {
-  if (camVideo) return;
-  const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-  camVideo = document.createElement('video');
-  camVideo.srcObject = stream;
-  camVideo.muted = true;
-  await camVideo.play();
-  const sampleCanvas = document.createElement('canvas');
-  sampleCanvas.width = 16; sampleCanvas.height = 16;
-  camSampleCtx = sampleCanvas.getContext('2d');
-  requestAnimationFrame(camTick);
-}
-function camTick() {
-  if (!camVideo) return;
-  if (camVideo.readyState >= 2) {
-    camSampleCtx.drawImage(camVideo, 0, 0, 16, 16);
-    const data = camSampleCtx.getImageData(0, 0, 16, 16).data;
-    let sum = 0;
-    for (let i = 0; i < data.length; i += 4) sum += (data[i] + data[i + 1] + data[i + 2]) / 3;
-    const avg = sum / (data.length / 4) / 255;
-    if (camMod.enabled) {
-      // founder S221: same multiSelect fix as audioTick above.
-      multiSelect.forEach(idx => {
-        const key = idx + ':' + camMod.param;
-        const base = camMod.base[key] ?? active.ribbons[idx][camMod.param];
-        active.ribbons[idx][camMod.param] = Math.max(0, base + avg * camMod.amount);
-      });
-      render();
-      if (pane) pane.refresh();
-    }
-  }
-  requestAnimationFrame(camTick);
-}
-
-// founder S221 (SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 3 AT3): target2/
-// amount2 let one LFO drive a second parameter from the same oscillator
-// phase, e.g. width AND tremor together -- 'none' means single-target,
-// same behavior as before this field existed.
-const lfos = [
-  { enabled: false, waveform: 'sine', period: 2000, phase: 0, hold: false, target: 'tremor', amount: 0.02, target2: 'none', amount2: 0.02 },
-  { enabled: false, waveform: 'sine', period: 3000, phase: 0.25, hold: false, target: 'gap', amount: 0.006, target2: 'none', amount2: 0.006 },
-];
-const lfoBase = {};
-function lfoWaveValue(lfo, tMs) {
-  if (lfo.hold) return 0;
-  const phase = ((tMs / lfo.period) + lfo.phase) % 1;
-  if (lfo.waveform === 'square') return phase < 0.5 ? 1 : -1;
-  if (lfo.waveform === 'triangle') return phase < 0.5 ? (phase * 4 - 1) : (3 - phase * 4);
-  return Math.sin(phase * Math.PI * 2);
-}
-function lfoTick(now) {
-  let any = false;
-  lfos.forEach(lfo => {
-    if (!lfo.enabled) return;
-    any = true;
-    const v = lfoWaveValue(lfo, now);
-    // founder S221: same multiSelect fix as audioTick/camTick above.
-    multiSelect.forEach(idx => {
-      const key = idx + ':' + lfo.target;
-      const base = lfoBase[key] ?? active.ribbons[idx][lfo.target];
-      active.ribbons[idx][lfo.target] = Math.max(0, base + v * lfo.amount);
-    });
-    // Phase 3 AT3: drive a second parameter from the SAME oscillator phase
-    // (shared `v`), not a second independent LFO -- that's what makes this
-    // "one modulation source, two parameters" rather than just two LFOs.
-    if (lfo.target2 && lfo.target2 !== 'none') {
-      multiSelect.forEach(idx => {
-        const key2 = idx + ':' + lfo.target2;
-        const base2 = lfoBase[key2] ?? active.ribbons[idx][lfo.target2];
-        active.ribbons[idx][lfo.target2] = Math.max(0, base2 + v * lfo.amount2);
-      });
-    }
-  });
-  if (any) { render(); if (pane) pane.refresh(); }
-  requestAnimationFrame(lfoTick);
-}
-requestAnimationFrame(lfoTick);
-
-// ---- Ambient wander -- ported technique from pl-headless's GoldCurves hero
-// (components/art/GoldCurves.tsx): each control point drifts around its
-// home position via independent sin/cos oscillation, distinct per-point
-// frequency + phase so nothing moves in sync, driven by a plain frame
-// counter (not delta-time) -- same convention the real hero uses. ----
-let wanderT = 0;
-const wander = { enabled: true, amplitude: 0.02, speed: 1 };
-function wanderOffset(pointIndex, ribbonIndex, axis) {
-  const freq = 0.3 + ((pointIndex * 7 + ribbonIndex * 13 + (axis === 'y' ? 5 : 0)) % 17) / 10;
-  const phase = pointIndex * 2.1 + ribbonIndex * 0.7 + (axis === 'y' ? 1.57 : 0);
-  return Math.sin(wanderT * 0.008 * wander.speed * freq + phase) * wander.amplitude;
-}
-function wanderTick() {
-  if (wander.enabled) { wanderT++; render(); }
-  requestAnimationFrame(wanderTick);
-}
-requestAnimationFrame(wanderTick);
-
-// ============================================================
-// Adjustments + Effects (Batch 2): a fixed-order post-process pass over
-// the whole rendered frame, run after ribbons draw and before UI chrome
-// (segment highlights, point handles) so editor overlays never get
-// processed as if they were part of the artwork.
-// ============================================================
-const BLEND_MODES = {
-  Normal: 'source-over', Multiply: 'multiply', Darken: 'darken', Lighten: 'lighten', Screen: 'screen',
-  'Color Dodge': 'color-dodge', 'Color Burn': 'color-burn', 'Hard Light': 'hard-light', 'Soft Light': 'soft-light',
-  Difference: 'difference', Exclusion: 'exclusion', Hue: 'hue', Saturation: 'saturation', Color: 'color', Luminosity: 'luminosity',
-};
-
-const adj = {
-  hue: 0, saturation: 0, brightness: 0,
-  shadowsTint: '#000000', shadowsAmt: 0,
-  midsTint: '#808080', midsAmt: 0,
-  highsTint: '#ffffff', highsAmt: 0,
-  curveEnabled: false,
-  curvePoints: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
-  gradientEnabled: false,
-  gradientStops: ['#1a1510', '#c9a84c'],
-};
-const fx = { opacity: 1, noise: 0, sharpen: 0, bloom: 0, glitch: 0, halftone: 0, chromaticAberration: 0 };
-
-function rgbToHsl(r, g, b) {
-  r /= 255; g /= 255; b /= 255;
-  const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  let h = 0; const l = (max + min) / 2;
-  const d = max - min;
-  const s = d === 0 ? 0 : (l > 0.5 ? d / (2 - max - min) : d / (max + min));
-  if (d !== 0) {
-    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
-    else if (max === g) h = (b - r) / d + 2;
-    else h = (r - g) / d + 4;
-    h /= 6;
-  }
-  return [h * 360, s * 100, l * 100];
-}
-function hslToRgb(h, s, l) {
-  h /= 360; s /= 100; l /= 100;
-  if (s === 0) { const v = l * 255; return [v, v, v]; }
-  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-  const p = 2 * l - q;
-  const hue2rgb = (p, q, t) => {
-    if (t < 0) t += 1; if (t > 1) t -= 1;
-    if (t < 1 / 6) return p + (q - p) * 6 * t;
-    if (t < 1 / 2) return q;
-    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
-    return p;
-  };
-  return [hue2rgb(p, q, h + 1 / 3) * 255, hue2rgb(p, q, h) * 255, hue2rgb(p, q, h - 1 / 3) * 255];
-}
-// ponytail: 3-point shadow/mid/highlight sliders stand in for a real
-// draggable tone-curve graph -- a full graph is its own curve-editor UI
-// (same class of work as Group B's point editor), not built this pass.
-function buildCurveLUT(points) {
-  const pts = [...points].sort((a, b) => a.x - b.x);
-  const lut = new Uint8ClampedArray(256);
-  for (let i = 0; i < 256; i++) {
-    const x = i / 255;
-    let a = pts[0], b = pts[pts.length - 1];
-    for (let j = 0; j < pts.length - 1; j++) {
-      if (x >= pts[j].x && x <= pts[j + 1].x) { a = pts[j]; b = pts[j + 1]; break; }
-    }
-    const t = (b.x - a.x) ? (x - a.x) / (b.x - a.x) : 0;
-    lut[i] = Math.round((a.y + (b.y - a.y) * t) * 255);
-  }
-  return lut;
-}
-function hexToRgbArr(hex) { const c = hexToRgb(hex); return [c.r, c.g, c.b]; }
-
-// SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 1/2: postFX() reports its own
-// sub-timing into lastPostFxMs/Mode instead of writing the readout directly
-// -- render() (below) owns the combined total, since Phase 2's ribbon
-// materials add real cost of their own that a postFX-only number would miss
-// entirely (AT3 needs the STACKED total, not just the post-effects slice).
-let lastPostFxMs = 0, lastPostFxMode = null;
-let lastMaterialError = null;
-function postFX() {
-  const anyAdj = adj.hue || adj.saturation || adj.brightness || adj.shadowsAmt || adj.midsAmt || adj.highsAmt || adj.curveEnabled || adj.gradientEnabled;
-  const anyFx = fx.noise || fx.sharpen || fx.bloom || fx.glitch || fx.halftone || fx.opacity < 1 || fx.chromaticAberration;
-  if (!anyAdj && !anyFx) { lastPostFxMode = null; return; }
-
-  const t0 = performance.now();
-
-  if (postFxGl) {
-    const curveLUT = adj.curveEnabled ? buildCurveLUT(adj.curvePoints) : null;
-    postFxGl.render(canvas, adj, fx, curveLUT, active.ground, hexToRgbArr);
-    ctx.drawImage(postFxGl.canvas, 0, 0);
-  } else {
-    postFXCpu();
-  }
-
-  lastPostFxMs = performance.now() - t0;
-  lastPostFxMode = postFxGl ? 'GL' : (postFxGlError ? `CPU fallback: ${postFxGlError}` : 'CPU');
-}
-
-function postFXCpu() {
-  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const d = img.data;
-  const curveLUT = adj.curveEnabled ? buildCurveLUT(adj.curvePoints) : null;
-  const [gs0r, gs0g, gs0b] = adj.gradientEnabled ? hexToRgbArr(adj.gradientStops[0]) : [0, 0, 0];
-  const [gs1r, gs1g, gs1b] = adj.gradientEnabled ? hexToRgbArr(adj.gradientStops[1]) : [0, 0, 0];
-  const [shR, shG, shB] = hexToRgbArr(adj.shadowsTint);
-  const [miR, miG, miB] = hexToRgbArr(adj.midsTint);
-  const [hiR, hiG, hiB] = hexToRgbArr(adj.highsTint);
-
-  for (let i = 0; i < d.length; i += 4) {
-    let r = d[i], g = d[i + 1], b = d[i + 2];
-
-    if (adj.hue || adj.saturation || adj.brightness) {
-      let [h, s, l] = rgbToHsl(r, g, b);
-      h = (h + adj.hue + 360) % 360;
-      s = Math.max(0, Math.min(100, s + adj.saturation));
-      l = Math.max(0, Math.min(100, l + adj.brightness / 2));
-      [r, g, b] = hslToRgb(h, s, l);
-    }
-
-    if (adj.shadowsAmt || adj.midsAmt || adj.highsAmt) {
-      const lum = (r + g + b) / 3 / 255;
-      const wShadow = Math.max(0, 1 - lum * 2);
-      const wHigh = Math.max(0, lum * 2 - 1);
-      const wMid = 1 - wShadow - wHigh;
-      r += (shR - 128) * wShadow * adj.shadowsAmt / 100 + (miR - 128) * wMid * adj.midsAmt / 100 + (hiR - 128) * wHigh * adj.highsAmt / 100;
-      g += (shG - 128) * wShadow * adj.shadowsAmt / 100 + (miG - 128) * wMid * adj.midsAmt / 100 + (hiG - 128) * wHigh * adj.highsAmt / 100;
-      b += (shB - 128) * wShadow * adj.shadowsAmt / 100 + (miB - 128) * wMid * adj.midsAmt / 100 + (hiB - 128) * wHigh * adj.highsAmt / 100;
-    }
-
-    if (curveLUT) {
-      r = curveLUT[Math.max(0, Math.min(255, Math.round(r)))];
-      g = curveLUT[Math.max(0, Math.min(255, Math.round(g)))];
-      b = curveLUT[Math.max(0, Math.min(255, Math.round(b)))];
-    }
-
-    if (adj.gradientEnabled) {
-      const lum = (r + g + b) / 3 / 255;
-      r = lerp(gs0r, gs1r, lum); g = lerp(gs0g, gs1g, lum); b = lerp(gs0b, gs1b, lum);
-    }
-
-    if (fx.noise) {
-      const n = (Math.random() * 2 - 1) * fx.noise * 255;
-      r += n; g += n; b += n;
-    }
-
-    d[i] = Math.max(0, Math.min(255, r));
-    d[i + 1] = Math.max(0, Math.min(255, g));
-    d[i + 2] = Math.max(0, Math.min(255, b));
-  }
-
-  if (fx.chromaticAberration > 0) {
-    const shift = Math.round(fx.chromaticAberration * 20);
-    const orig = new Uint8ClampedArray(d);
-    const w = canvas.width, h = canvas.height;
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const idx = (y * w + x) * 4;
-        const rx = Math.min(w - 1, x + shift), bx = Math.max(0, x - shift);
-        d[idx] = orig[(y * w + rx) * 4];
-        d[idx + 2] = orig[(y * w + bx) * 4 + 2];
-      }
-    }
-  }
-
-  if (fx.sharpen > 0) {
-    const w = canvas.width, h = canvas.height;
-    const orig = new Uint8ClampedArray(d);
-    const amt = fx.sharpen;
-    for (let y = 1; y < h - 1; y++) {
-      for (let x = 1; x < w - 1; x++) {
-        const idx = (y * w + x) * 4;
-        for (let c = 0; c < 3; c++) {
-          const center = orig[idx + c];
-          const lap = center * 4 - orig[idx - w * 4 + c] - orig[idx + w * 4 + c] - orig[idx - 4 + c] - orig[idx + 4 + c];
-          d[idx + c] = Math.max(0, Math.min(255, center + lap * amt));
-        }
-      }
-    }
-  }
-
-  ctx.putImageData(img, 0, 0);
-
-  if (fx.glitch > 0) {
-    const bands = Math.round(fx.glitch * 12);
-    for (let i = 0; i < bands; i++) {
-      const y = Math.random() * canvas.height;
-      const bh = 4 + Math.random() * 20;
-      const dx = (Math.random() * 2 - 1) * fx.glitch * 40;
-      ctx.drawImage(canvas, 0, y, canvas.width, bh, dx, y, canvas.width, bh);
-    }
-  }
-
-  if (fx.bloom > 0) {
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = fx.bloom * 0.5;
-    ctx.filter = `blur(${Math.round(fx.bloom * 20)}px)`;
-    ctx.drawImage(canvas, 0, 0, canvas.width, canvas.height, 0, 0, W, HGT);
-    ctx.filter = 'none';
-    ctx.restore();
-  }
-
-  if (fx.halftone > 0) {
-    const cell = Math.max(4, Math.round(24 * (1 - fx.halftone) + 4));
-    const sample = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-    const dpr = canvas.width / W;
-    ctx.fillStyle = active.ground;
-    ctx.fillRect(0, 0, W, HGT);
-    ctx.fillStyle = '#1a1510';
-    for (let y = 0; y < HGT; y += cell) {
-      for (let x = 0; x < W; x += cell) {
-        const px = Math.min(canvas.width - 1, Math.round(x * dpr));
-        const py = Math.min(canvas.height - 1, Math.round(y * dpr));
-        const idx = (py * canvas.width + px) * 4;
-        const lum = (sample[idx] + sample[idx + 1] + sample[idx + 2]) / 3 / 255;
-        const rad = (1 - lum) * cell * 0.5;
-        if (rad > 0.5) { ctx.beginPath(); ctx.arc(x + cell / 2, y + cell / 2, rad, 0, Math.PI * 2); ctx.fill(); }
-      }
-    }
-  }
-
-  if (fx.opacity < 1) {
-    ctx.save();
-    ctx.globalAlpha = 1 - fx.opacity;
-    ctx.fillStyle = active.ground;
-    ctx.fillRect(0, 0, W, HGT);
-    ctx.restore();
-  }
-}
-
-// ============================================================
-// Curve editing (Group B): bezier handles (#8/#10), closed loops (#9),
-// segment hover/select + live subdivision (#6/#7), sketch-to-spline (#11).
-// ============================================================
-function addDefaultHandles(r, i) {
-  const n = r.points.length;
-  const prev = r.points[r.closed ? (i - 1 + n) % n : Math.max(0, i - 1)];
-  const next = r.points[r.closed ? (i + 1) % n : Math.min(n - 1, i + 1)];
-  const pt = r.points[i];
-  let dx = next.x - prev.x, dy = next.y - prev.y;
-  const m = Math.hypot(dx, dy) || 1;
-  dx /= m; dy /= m;
-  const len = 0.045;
-  pt.hOut = { x: pt.x + dx * len, y: pt.y + dy * len };
-  pt.hIn = { x: pt.x - dx * len, y: pt.y - dy * len };
-  pt.tied = true;
-}
-function alignSelectedPoint() {
-  if (!selectedPoint) return;
-  const r = active.ribbons[selectedPoint.ribbon];
-  const pt = r.points[selectedPoint.point];
-  if (!pt.hOut || !pt.hIn) return;
-  const src = lastHandleSide, dst = src === 'hOut' ? 'hIn' : 'hOut';
-  const dx = pt[src].x - pt.x, dy = pt[src].y - pt.y;
-  pt[dst] = { x: pt.x - dx, y: pt.y - dy };
-  render();
-}
-function updateHandleDrag(ribbon, point, side, mx, my, dx, dy) {
-  const r = active.ribbons[ribbon];
-  const pt = r.points[point];
-  pt[side] = { x: (mx + dx) / W, y: (my + dy) / HGT };
-  lastHandleSide = side;
-  if (pt.tied !== false) {
-    const other = side === 'hOut' ? 'hIn' : 'hOut';
-    if (pt[other]) {
-      const dx = pt[side].x - pt.x, dy = pt[side].y - pt.y;
-      pt[other] = { x: pt.x - dx, y: pt.y - dy };
-    }
-  }
-  render();
-}
-
-// ---- Per-point width (founder S215: "the widths within the ribbons change
-// in my art point" -- width was one taper curve for the whole ribbon; now
-// each control point carries an optional widthMult (default 1), linearly
-// interpolated between neighboring points across the spline's u range and
-// multiplied into the taper envelope in render()'s wFn. A visual handle sits
-// on the local normal at the selected point, distance from the point encoding
-// the multiplier -- drag it out to fatten that stretch, in to thin it. ----
-function widthMultAt(r, u) {
-  const pts = r.points;
-  const n = pts.length;
-  const segCount = r.closed ? n : n - 1;
-  const segF = Math.max(0, Math.min(segCount - 1e-6, u * segCount));
-  const segIdx = Math.floor(segF);
-  const t = segF - segIdx;
-  const i0 = r.closed ? segIdx % n : segIdx;
-  const i1 = r.closed ? (segIdx + 1) % n : Math.min(n - 1, segIdx + 1);
-  const w0 = pts[i0].widthMult ?? 1;
-  const w1 = pts[i1].widthMult ?? 1;
-  return w0 + (w1 - w0) * t;
-}
-function pointNormalScreen(spts, i, closed) {
-  const n = spts.length;
-  const prev = spts[closed ? (i - 1 + n) % n : Math.max(0, i - 1)];
-  const next = spts[closed ? (i + 1) % n : Math.min(n - 1, i + 1)];
-  const dx = next.x - prev.x, dy = next.y - prev.y;
-  const m = Math.hypot(dx, dy) || 1;
-  return { x: -dy / m, y: dx / m };
-}
-const WIDTH_HANDLE_BASE = 14, WIDTH_HANDLE_SCALE = 18;
-function widthHandlePos(r, i) {
-  const spts = r.points.map(p => ({ x: p.x * W, y: p.y * HGT }));
-  const base = spts[i];
-  const nrm = pointNormalScreen(spts, i, r.closed);
-  const wm = r.points[i].widthMult ?? 1;
-  const dist = WIDTH_HANDLE_BASE + wm * WIDTH_HANDLE_SCALE;
-  return { x: base.x + nrm.x * dist, y: base.y + nrm.y * dist, base, nrm };
-}
-function hitTestWidthHandle(mx, my) {
-  if (!selectedPoint || selectedPoint.ribbon !== selectedRibbon) return false;
-  const r = active.ribbons[selectedRibbon];
-  const { x, y } = widthHandlePos(r, selectedPoint.point);
-  return Math.hypot(mx - x, my - y) < 8;
-}
-
-function distToSegment(px, py, a, b) {
-  const dx = b.x - a.x, dy = b.y - a.y;
-  const len2 = dx * dx + dy * dy || 1;
-  let t = ((px - a.x) * dx + (py - a.y) * dy) / len2;
-  t = Math.max(0, Math.min(1, t));
-  return Math.hypot(px - (a.x + dx * t), py - (a.y + dy * t));
-}
-function hitTestPoint(mx, my, ribbon) {
-  const r = active.ribbons[ribbon];
-  for (let i = 0; i < r.points.length; i++) {
-    const px = r.points[i].x * W, py = r.points[i].y * HGT;
-    if (Math.hypot(mx - px, my - py) < 10) return i;
-  }
-  return -1;
-}
-function hitTestHandle(mx, my) {
-  if (!selectedPoint || selectedPoint.ribbon !== selectedRibbon) return null;
-  const pt = active.ribbons[selectedRibbon].points[selectedPoint.point];
-  for (const side of ['hOut', 'hIn']) {
-    if (!pt[side]) continue;
-    const hx = pt[side].x * W, hy = pt[side].y * HGT;
-    if (Math.hypot(mx - hx, my - hy) < 8) return side;
-  }
-  return null;
-}
-function hitTestSegment(mx, my, ribbonIdx = selectedRibbon) {
-  const r = active.ribbons[ribbonIdx];
-  const spts = r.points.map(p => ({ x: p.x * W, y: p.y * HGT }));
-  const segCount = r.closed ? spts.length : spts.length - 1;
-  let best = -1, bestD = 14;
-  for (let i = 0; i < segCount; i++) {
-    const d = distToSegment(mx, my, spts[i], spts[(i + 1) % spts.length]);
-    if (d < bestD) { bestD = d; best = i; }
-  }
-  return best;
-}
-
-function finalizeSketch() {
-  const stroke = sketchMode.stroke;
-  sketchMode.active = false;
-  sketchMode.stroke = [];
-  if (stroke.length < 2) { render(); return; }
-  const targetCount = 8;
-  const pts = [];
-  for (let i = 0; i < targetCount; i++) {
-    const idx = Math.round(i * (stroke.length - 1) / (targetCount - 1));
-    pts.push({ x: stroke[idx].x / W, y: stroke[idx].y / HGT });
-  }
-  active.ribbons.push({ points: pts, width: 0.05, taper: 0.1, tremor: 0.01, gap: 0.008, ink: '#c9a84c' });
-  selectedRibbon = active.ribbons.length - 1;
-  selectedPoint = null;
-  buildPane();
-  render();
-}
-
-// ============================================================
-// Ribbon list -- the group-selection UI (plain DOM, not Tweakpane): click a
-// row to make it the primary edit target (curve editing + Animation/
-// Modulation), check its box to fold it into the "Ribbon params" batch-edit
-// group without changing the primary. Driven by the founder's own framing
-// (S215): composition (Ground/Adjustments/Effects/Wander, already global) ->
-// ribbons as a whole (this list, or "All ribbons") -> individual (one row).
-// ============================================================
-function setPrimaryRibbon(idx, { resetGroup = true } = {}) {
-  if (idx < 0 || idx >= active.ribbons.length) return;
-  selectedRibbon = idx;
-  if (resetGroup) multiSelect = new Set([idx]);
-  else multiSelect.add(idx);
-  selectedPoint = null; selectedSegment = null; hoverSegment = null;
-  if (pane) { ribbonIndexObj.value = idx; pane.refresh(); }
-  buildRibbonFolder();
-  renderRibbonList();
-  render();
-}
-
 function renderRibbonList() {
-  if (!active) return;
+  if (!state.active) return;
   ribbonListEl.innerHTML = '';
-  active.ribbons.forEach((r, i) => {
+  state.active.ribbons.forEach((r, i) => {
     const row = document.createElement('div');
-    row.className = 'ribbon-row' + (i === selectedRibbon ? ' primary' : '') + (multiSelect.has(i) ? ' in-group' : '');
+    row.className = 'ribbon-row' + (i === state.selectedRibbon ? ' primary' : '') + (state.multiSelect.has(i) ? ' in-group' : '');
     const cb = document.createElement('input');
     cb.type = 'checkbox';
-    cb.checked = multiSelect.has(i);
+    cb.checked = state.multiSelect.has(i);
     cb.title = 'Include in the batch-edit group';
     cb.addEventListener('click', (e) => e.stopPropagation());
     cb.addEventListener('change', () => {
-      if (cb.checked) multiSelect.add(i);
-      else if (multiSelect.size > 1) multiSelect.delete(i);
-      else cb.checked = true; // group can't go empty -- keep at least one
+      if (cb.checked) state.multiSelect.add(i);
+      else if (state.multiSelect.size > 1) state.multiSelect.delete(i);
+      else cb.checked = true;
       renderRibbonList();
       buildRibbonFolder();
     });
@@ -790,43 +59,42 @@ function renderRibbonList() {
     label.className = 'ribbon-label';
     label.textContent = `Ribbon ${i + 1}`;
     row.append(cb, swatch, label);
-    row.addEventListener('click', () => setPrimaryRibbon(i));
+    row.addEventListener('click', () => { setPrimaryRibbon(i); onSelectionChanged(); });
     ribbonListEl.appendChild(row);
   });
 }
+function onSelectionChanged() {
+  if (pane) { ribbonIndexObj.value = state.selectedRibbon; pane.refresh(); }
+  buildRibbonFolder();
+  renderRibbonList();
+}
 document.getElementById('ribbon-select-all').addEventListener('click', () => {
-  multiSelect = new Set(active.ribbons.map((_, i) => i));
+  state.multiSelect = new Set(state.active.ribbons.map((_, i) => i));
   renderRibbonList();
   buildRibbonFolder();
 });
 document.getElementById('ribbon-select-one').addEventListener('click', () => {
-  multiSelect = new Set([selectedRibbon]);
+  state.multiSelect = new Set([state.selectedRibbon]);
   renderRibbonList();
   buildRibbonFolder();
 });
 
 // ============================================================
-// Panel (Tweakpane)
+// Panel (Tweakpane) -- the phone/controller's lightweight surface, unchanged.
 // ============================================================
 function buildPane() {
   if (pane) pane.dispose();
-  pane = new Pane({ title: active.name, container: document.getElementById('panel') });
+  pane = new Pane({ title: state.active.name, container: document.getElementById('panel') });
 
-  pane.addBinding(active, 'ground', { label: 'Ground' }).on('change', () => { render(); scheduleSync(); });
+  pane.addBinding(state.active, 'ground', { label: 'Ground' }).on('change', () => { render(); scheduleSync(); });
 
-  const ribbonNames = active.ribbons.map((_, i) => `Ribbon ${i + 1}`);
-  ribbonIndexObj.value = selectedRibbon;
+  const ribbonNames = state.active.ribbons.map((_, i) => `Ribbon ${i + 1}`);
+  ribbonIndexObj.value = state.selectedRibbon;
   pane.addBinding(ribbonIndexObj, 'value', {
     label: 'Editing', options: Object.fromEntries(ribbonNames.map((n, i) => [n, i])),
-  }).on('change', (ev) => setPrimaryRibbon(ev.value));
+  }).on('change', (ev) => { setPrimaryRibbon(ev.value); onSelectionChanged(); });
 
   buildRibbonFolder();
-  // Geometry editing (Curve editing's closed-loop/sketch) needs the canvas +
-  // pointer-drag machinery; Animation/Modulation's audio/camera/keyframe
-  // playback is a live per-device timer, not something a "set this value"
-  // sync message models cleanly yet (S215 scope cut, named to the founder).
-  // Both stay desktop-only for v1 -- the phone drives Ribbon params/Ground/
-  // Adjustments/Effects, the actual "fader board" surface.
   if (!isController) buildCurveFolder();
   if (!isController) buildAnimationFolder();
   if (!isController) buildModulationFolder();
@@ -835,36 +103,22 @@ function buildPane() {
 
   const exportBtn = pane.addButton({ title: 'Copy tuned values as JSON' });
   exportBtn.on('click', () => {
-    const json = JSON.stringify(active, null, 2);
+    const json = JSON.stringify(state.active, null, 2);
     navigator.clipboard.writeText(json);
     exportBtn.title = 'Copied!';
     setTimeout(() => (exportBtn.title = 'Copy tuned values as JSON'), 1200);
   });
 }
 
-// #19: auto-generate a widget from the parameter's own type/naming
-// convention instead of a hand-wired addBinding per param. A numeric
-// key with sibling <key>Min/<key>Max on the object gets that range; a
-// key with no siblings falls back to a small known-parameter default
-// table -- either way, adding a NEW numeric ribbon field in pieces.js
-// gets a working slider with zero new main.js code.
-const NUMERIC_DEFAULTS = { width: [0.01, 0.2, 0.005], taper: [0.02, 0.3, 0.005], tremor: [0, 0.1, 0.002], gap: [0, 0.03, 0.001], outlineWidth: [0, 0.03, 0.001] };
-const SKIP_KEYS = new Set(['points', 'ink', 'core', 'glow', 'closed']);
-
-// Multi-select apply (#215): numeric params apply as a DELTA across every
-// ribbon in multiSelect -- each ribbon keeps its own relative width/taper/etc,
-// the group just nudges together (Photoshop/Blender multi-object-edit
-// convention). Color/blend/glow apply as an absolute SET -- "same color/blend
-// mode across the group" is what a group edit means for those.
 function bindMultiNumeric(folder, key, opts) {
-  const r = active.ribbons[selectedRibbon];
+  const r = state.active.ribbons[state.selectedRibbon];
   const proxy = { [key]: r[key] };
   let last = r[key];
   folder.addBinding(proxy, key, opts).on('change', (ev) => {
     const delta = ev.value - last;
     last = ev.value;
-    multiSelect.forEach(idx => {
-      const rr = active.ribbons[idx];
+    state.multiSelect.forEach((idx) => {
+      const rr = state.active.ribbons[idx];
       if (!rr || typeof rr[key] !== 'number') return;
       const nv = rr[key] + delta;
       rr[key] = opts.min !== undefined ? Math.max(opts.min, Math.min(opts.max, nv)) : nv;
@@ -874,11 +128,11 @@ function bindMultiNumeric(folder, key, opts) {
   });
 }
 function bindMultiAbsolute(folder, key, opts, guard) {
-  const r = active.ribbons[selectedRibbon];
+  const r = state.active.ribbons[state.selectedRibbon];
   const proxy = { [key]: r[key] };
   folder.addBinding(proxy, key, opts).on('change', (ev) => {
-    multiSelect.forEach(idx => {
-      const rr = active.ribbons[idx];
+    state.multiSelect.forEach((idx) => {
+      const rr = state.active.ribbons[idx];
       if (!rr) return;
       if (guard && !guard(rr)) return;
       rr[key] = ev.value;
@@ -887,15 +141,8 @@ function bindMultiAbsolute(folder, key, opts, guard) {
     scheduleSync();
   });
 }
-
-// #19: auto-generate a widget from the parameter's own type/naming
-// convention instead of a hand-wired addBinding per param. A numeric
-// key with sibling <key>Min/<key>Max on the object gets that range; a
-// key with no siblings falls back to a small known-parameter default
-// table -- either way, adding a NEW numeric ribbon field in pieces.js
-// gets a working slider with zero new main.js code.
 function autoBindNumeric(folder, obj) {
-  Object.keys(obj).forEach(key => {
+  Object.keys(obj).forEach((key) => {
     if (SKIP_KEYS.has(key) || key.endsWith('Min') || key.endsWith('Max') || key.endsWith('Step')) return;
     if (typeof obj[key] !== 'number') return;
     const hasRange = obj[key + 'Min'] !== undefined && obj[key + 'Max'] !== undefined;
@@ -910,16 +157,9 @@ function autoBindNumeric(folder, obj) {
 let ribbonFolder = null;
 function buildRibbonFolder() {
   if (ribbonFolder) ribbonFolder.dispose();
-  const r = active.ribbons[selectedRibbon];
-  // SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 2: defaults for the new
-  // per-ribbon material fields, same init pattern buildCurveFolder already
-  // uses for `closed` -- must exist before autoBindNumeric reads
-  // Object.keys(r), and pieces loaded from PIECES won't have these yet.
-  r.material = r.material || 'ribbon';
-  if (r.materialAmount === undefined) r.materialAmount = 0.5;
-  if (r.materialSpeed === undefined) r.materialSpeed = 0.5;
-  const n = multiSelect.size;
-  ribbonFolder = pane.addFolder({ title: n > 1 ? `Ribbon params (${n} selected)` : `Ribbon ${selectedRibbon + 1} params` });
+  const r = state.active.ribbons[state.selectedRibbon];
+  const n = state.multiSelect.size;
+  ribbonFolder = pane.addFolder({ title: n > 1 ? `Ribbon params (${n} selected)` : `Ribbon ${state.selectedRibbon + 1} params` });
   bindMultiAbsolute(ribbonFolder, 'material', { label: 'Material', options: RIBBON_MATERIALS });
   autoBindNumeric(ribbonFolder, r);
   bindMultiAbsolute(ribbonFolder, 'ink', { view: 'color' });
@@ -929,20 +169,16 @@ function buildRibbonFolder() {
   bindMultiAbsolute(ribbonFolder, 'blend', { label: 'Blend mode', options: BLEND_MODES });
 }
 
-// #9 closed loop toggle + #11 sketch-to-spline, live per selected ribbon.
 function buildCurveFolder() {
   const cf = pane.addFolder({ title: 'Curve editing', expanded: false });
-  const r = active.ribbons[selectedRibbon];
+  const r = state.active.ribbons[state.selectedRibbon];
   r.closed = !!r.closed;
-  // founder S221: was bound straight to `r` (selectedRibbon only) -- this is
-  // an absolute-set boolean, same shape as color/blend in buildRibbonFolder,
-  // so it reuses bindMultiAbsolute instead of a bespoke direct binding.
   bindMultiAbsolute(cf, 'closed', { label: 'Closed loop' });
-  const sketchBtn = cf.addButton({ title: sketchMode.active ? 'Stop sketching' : 'Sketch new ribbon' });
+  const sketchBtn = cf.addButton({ title: state.sketchMode.active ? 'Stop sketching' : 'Sketch new ribbon' });
   sketchBtn.on('click', () => {
-    sketchMode.active = !sketchMode.active;
-    sketchMode.stroke = [];
-    sketchBtn.title = sketchMode.active ? 'Stop sketching' : 'Sketch new ribbon';
+    state.sketchMode.active = !state.sketchMode.active;
+    state.sketchMode.stroke = [];
+    sketchBtn.title = state.sketchMode.active ? 'Stop sketching' : 'Sketch new ribbon';
   });
   cf.addBinding({ hint: 'H: toggle handles - K: align - T: tied/untied' }, 'hint', { readonly: true, label: '' });
 }
@@ -953,29 +189,29 @@ function buildAnimationFolder() {
   animFolder.addButton({ title: 'Shuffle selected group' }).on('click', shuffleSelected);
 
   const wanderFolder = animFolder.addFolder({ title: 'Ambient wander (all ribbons)' });
-  wanderFolder.addBinding(wander, 'enabled');
-  wanderFolder.addBinding(wander, 'amplitude', { min: 0, max: 0.08, step: 0.002 });
-  wanderFolder.addBinding(wander, 'speed', { min: 0.2, max: 3, step: 0.1 });
+  wanderFolder.addBinding(state.wander, 'enabled');
+  wanderFolder.addBinding(state.wander, 'amplitude', { min: 0, max: 0.08, step: 0.002 });
+  wanderFolder.addBinding(state.wander, 'speed', { min: 0.2, max: 3, step: 0.1 });
 
   const morphState = { duration: 1200, ease: true };
   const presetFolder = animFolder.addFolder({ title: 'Preset A / B morph' });
-  presetFolder.addButton({ title: 'Save current as A' }).on('click', () => { presetA = snapshotPreset(); });
-  presetFolder.addButton({ title: 'Save current as B' }).on('click', () => { presetB = snapshotPreset(); });
+  presetFolder.addButton({ title: 'Save current as A' }).on('click', () => { state.presetA = snapshotPreset(); });
+  presetFolder.addButton({ title: 'Save current as B' }).on('click', () => { state.presetB = snapshotPreset(); });
   presetFolder.addBinding(morphState, 'duration', { min: 100, max: 6000, step: 100, label: 'Duration (ms)' });
   presetFolder.addBinding(morphState, 'ease', { label: 'Ease' });
-  presetFolder.addButton({ title: 'Morph -> B' }).on('click', () => morphTo(presetB, morphState.duration, morphState.ease));
-  presetFolder.addButton({ title: 'Morph -> A' }).on('click', () => morphTo(presetA, morphState.duration, morphState.ease));
+  presetFolder.addButton({ title: 'Morph -> B' }).on('click', () => morphTo(state.presetB, morphState.duration, morphState.ease));
+  presetFolder.addButton({ title: 'Morph -> A' }).on('click', () => morphTo(state.presetA, morphState.duration, morphState.ease));
 
   const kfFolder = animFolder.addFolder({ title: 'Keyframe (one parameter)' });
-  kfFolder.addBinding(kf, 'param', { label: 'Parameter', options: { width: 'width', taper: 'taper', tremor: 'tremor', gap: 'gap' } });
-  kfFolder.addBinding(kf, 'a', { label: 'Value A', min: 0, max: 0.3, step: 0.005 });
-  kfFolder.addBinding(kf, 'b', { label: 'Value B', min: 0, max: 0.3, step: 0.005 });
-  kfFolder.addBinding(kf, 'duration', { label: 'Duration (ms)', min: 200, max: 8000, step: 100 });
-  kfFolder.addBinding(kf, 'interp', { label: 'Interpolation', options: { linear: 'linear', ease: 'ease' } });
-  kfFolder.addBinding(kf, 'extend', { label: 'Extend', options: { hold: 'hold', loop: 'loop', mirror: 'mirror' } });
+  kfFolder.addBinding(state.kf, 'param', { label: 'Parameter', options: { width: 'width', taper: 'taper', tremor: 'tremor', gap: 'gap' } });
+  kfFolder.addBinding(state.kf, 'a', { label: 'Value A', min: 0, max: 0.3, step: 0.005 });
+  kfFolder.addBinding(state.kf, 'b', { label: 'Value B', min: 0, max: 0.3, step: 0.005 });
+  kfFolder.addBinding(state.kf, 'duration', { label: 'Duration (ms)', min: 200, max: 8000, step: 100 });
+  kfFolder.addBinding(state.kf, 'interp', { label: 'Interpolation', options: { linear: 'linear', ease: 'ease' } });
+  kfFolder.addBinding(state.kf, 'extend', { label: 'Extend', options: { hold: 'hold', loop: 'loop', mirror: 'mirror' } });
   const playBtn = kfFolder.addButton({ title: 'Play' });
   playBtn.on('click', () => {
-    if (kf.playing) { kfStop(); playBtn.title = 'Play'; }
+    if (state.kf.playing) { kfStop(); playBtn.title = 'Play'; }
     else { kfPlay(); playBtn.title = 'Stop'; }
   });
 }
@@ -984,49 +220,43 @@ function buildModulationFolder() {
   const mf = pane.addFolder({ title: 'Modulation', expanded: false });
   const paramOpts = { width: 'width', taper: 'taper', tremor: 'tremor', gap: 'gap' };
 
-  const audioUI = { enabled: audioMod.enabled, param: audioMod.param, amount: audioMod.amount };
+  const audioUI = { enabled: state.audioMod.enabled, param: state.audioMod.param, amount: state.audioMod.amount };
   mf.addButton({ title: 'Enable microphone' }).on('click', async (ev) => {
     try { await startAudio(); ev.target.title = 'Microphone live'; } catch { ev.target.title = 'Mic denied/unavailable'; }
   });
   mf.addBinding(audioUI, 'enabled', { label: 'Audio drives param' }).on('change', (ev) => {
-    audioMod.enabled = ev.value;
-    // founder S221: capture a base per ribbon in multiSelect, not just selectedRibbon.
-    if (ev.value) multiSelect.forEach(idx => { audioMod.base[idx + ':' + audioUI.param] = active.ribbons[idx][audioUI.param]; });
+    state.audioMod.enabled = ev.value;
+    if (ev.value) state.multiSelect.forEach((idx) => { state.audioMod.base[idx + ':' + audioUI.param] = state.active.ribbons[idx][audioUI.param]; });
   });
   mf.addBinding(audioUI, 'param', { label: 'Audio target', options: paramOpts }).on('change', (ev) => {
-    audioMod.param = ev.value;
-    multiSelect.forEach(idx => { audioMod.base[idx + ':' + ev.value] = active.ribbons[idx][ev.value]; });
+    state.audioMod.param = ev.value;
+    state.multiSelect.forEach((idx) => { state.audioMod.base[idx + ':' + ev.value] = state.active.ribbons[idx][ev.value]; });
   });
-  mf.addBinding(audioUI, 'amount', { label: 'Audio amount', min: 0, max: 0.15, step: 0.005 }).on('change', (ev) => { audioMod.amount = ev.value; });
+  mf.addBinding(audioUI, 'amount', { label: 'Audio amount', min: 0, max: 0.15, step: 0.005 }).on('change', (ev) => { state.audioMod.amount = ev.value; });
 
-  const camUI = { enabled: camMod.enabled, param: camMod.param, amount: camMod.amount };
+  const camUI = { enabled: state.camMod.enabled, param: state.camMod.param, amount: state.camMod.amount };
   mf.addButton({ title: 'Enable camera' }).on('click', async (ev) => {
     try { await startCamera(); ev.target.title = 'Camera live'; } catch { ev.target.title = 'Camera denied/unavailable'; }
   });
   mf.addBinding(camUI, 'enabled', { label: 'Camera drives param' }).on('change', (ev) => {
-    camMod.enabled = ev.value;
-    // founder S221: same multiSelect base-capture fix as audio above.
-    if (ev.value) multiSelect.forEach(idx => { camMod.base[idx + ':' + camUI.param] = active.ribbons[idx][camUI.param]; });
+    state.camMod.enabled = ev.value;
+    if (ev.value) state.multiSelect.forEach((idx) => { state.camMod.base[idx + ':' + camUI.param] = state.active.ribbons[idx][camUI.param]; });
   });
   mf.addBinding(camUI, 'param', { label: 'Camera target', options: paramOpts }).on('change', (ev) => {
-    camMod.param = ev.value;
-    multiSelect.forEach(idx => { camMod.base[idx + ':' + ev.value] = active.ribbons[idx][ev.value]; });
+    state.camMod.param = ev.value;
+    state.multiSelect.forEach((idx) => { state.camMod.base[idx + ':' + ev.value] = state.active.ribbons[idx][ev.value]; });
   });
-  mf.addBinding(camUI, 'amount', { label: 'Camera amount', min: 0, max: 0.05, step: 0.002 }).on('change', (ev) => { camMod.amount = ev.value; });
+  mf.addBinding(camUI, 'amount', { label: 'Camera amount', min: 0, max: 0.05, step: 0.002 }).on('change', (ev) => { state.camMod.amount = ev.value; });
 
-  // Phase 3 AT3: a second, optional target so one LFO can drive 2 params at
-  // once from the same oscillator phase -- 'none' keeps today's single-target
-  // behavior exactly as it was.
   const target2Opts = { '— none —': 'none', ...paramOpts };
   const captureLfoBase = (lfo) => {
-    multiSelect.forEach(idx => {
-      lfoBase[idx + ':' + lfo.target] = active.ribbons[idx][lfo.target];
-      if (lfo.target2 && lfo.target2 !== 'none') lfoBase[idx + ':' + lfo.target2] = active.ribbons[idx][lfo.target2];
+    state.multiSelect.forEach((idx) => {
+      lfoBase[idx + ':' + lfo.target] = state.active.ribbons[idx][lfo.target];
+      if (lfo.target2 && lfo.target2 !== 'none') lfoBase[idx + ':' + lfo.target2] = state.active.ribbons[idx][lfo.target2];
     });
   };
-  lfos.forEach((lfo, idx) => {
+  state.lfos.forEach((lfo, idx) => {
     const lf = mf.addFolder({ title: `LFO ${idx + 1}`, expanded: false });
-    // founder S221: same multiSelect base-capture fix as audio/camera above.
     lf.addBinding(lfo, 'enabled').on('change', () => captureLfoBase(lfo));
     lf.addBinding(lfo, 'waveform', { options: { sine: 'sine', square: 'square', triangle: 'triangle' } });
     lf.addBinding(lfo, 'period', { label: 'Period (ms)', min: 200, max: 8000, step: 100 });
@@ -1041,6 +271,7 @@ function buildModulationFolder() {
 
 function buildAdjustmentsFolder() {
   const af = pane.addFolder({ title: 'Adjustments', expanded: false });
+  const adj = state.adj;
   af.addBinding(adj, 'hue', { min: -180, max: 180, step: 1 }).on('change', () => { render(); scheduleSync(); });
   af.addBinding(adj, 'saturation', { min: -100, max: 100, step: 1 }).on('change', () => { render(); scheduleSync(); });
   af.addBinding(adj, 'brightness', { min: -100, max: 100, step: 1 }).on('change', () => { render(); scheduleSync(); });
@@ -1068,6 +299,7 @@ function buildAdjustmentsFolder() {
 
 function buildEffectsFolder() {
   const ef = pane.addFolder({ title: 'Effects', expanded: false });
+  const fx = state.fx;
   ef.addBinding(fx, 'opacity', { min: 0, max: 1, step: 0.01 }).on('change', () => { render(); scheduleSync(); });
   ef.addBinding(fx, 'noise', { min: 0, max: 1, step: 0.01 }).on('change', () => { render(); scheduleSync(); });
   ef.addBinding(fx, 'sharpen', { min: 0, max: 1, step: 0.01 }).on('change', () => { render(); scheduleSync(); });
@@ -1078,664 +310,18 @@ function buildEffectsFolder() {
 }
 
 // ============================================================
-// Render
+// Wiring: pane refresh on every render() tick that used to trigger it,
+// rebuild-on-remote-state exactly as before -- see core/store.js's
+// setPaneRefreshHook/setRemoteApplyHook doc comment.
 // ============================================================
-function render() {
-  const _renderT0 = performance.now();
-  ctx.fillStyle = active.ground;
-  ctx.fillRect(0, 0, W, HGT);
-
-  active.ribbons.forEach((r, ribbonIdx) => {
-    r.closed = !!r.closed;
-    const pts = r.points.map((p, pi) => {
-      const wx = wander.enabled ? wanderOffset(pi, ribbonIdx, 'x') : 0;
-      const wy = wander.enabled ? wanderOffset(pi, ribbonIdx, 'y') : 0;
-      const tp = { x: (p.x + wx) * W, y: (p.y + wy) * HGT };
-      if (p.hOut) tp.hOut = { x: p.hOut.x * W, y: p.hOut.y * HGT };
-      if (p.hIn) tp.hIn = { x: p.hIn.x * W, y: p.hIn.y * HGT };
-      return tp;
-    });
-    const pl = H.splineHandles(pts, 220, r.closed);
-    const minDim = Math.min(W, HGT);
-    const wFn = (u) => H.widthAt(u, r.width * minDim, r.taper, false, false) * widthMultAt(r, u);
-    const gapPx = Math.max(3, r.gap * minDim);
-
-    if (r.glow) { ctx.save(); ctx.shadowColor = r.ink; ctx.shadowBlur = 24; }
-
-    ctx.fillStyle = active.ground;
-    H.ribbonPath(ctx, pl, wFn, gapPx * 2, r.tremor, r.closed);
-    ctx.fill();
-
-    const isCustomBlend = CUSTOM_BLEND_NAMES.has(r.blend);
-    if (r.material && r.material !== 'ribbon') {
-      // SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 2: the 4 new materials
-      // draw their own internal paths (multiple passes/stamps/dots), not one
-      // fillable H.ribbonPath call -- so unlike the two branches below, the
-      // outline stroke a few lines down needs the plain silhouette path
-      // rebuilt (unfilled) here, since "the same path is still current"
-      // no longer holds after a material's own drawing.
-      // founder S221: a real device hit "the curve went blank" after picking
-      // a material -- if a material fn throws mid-draw, its own ctx.restore()
-      // never runs, leaving globalCompositeOperation/globalAlpha stuck in
-      // whatever state it was mid-pass for EVERY frame after, not just this
-      // one (render() reuses the same ctx every frame). try/catch + an
-      // explicit reset stops one bad material from silently blanking the
-      // whole canvas forever; the error itself surfaces in frame-stat below
-      // instead of vanishing into an uncaught exception no one can see.
-      try {
-        drawRibbonMaterial(ctx, pl, wFn, r, r.tremor, r.closed);
-      } catch (e) {
-        console.error('ribbon material draw failed:', r.material, e);
-        lastMaterialError = `${r.material}: ${e.message || e}`;
-      }
-      ctx.globalAlpha = 1;
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.fillStyle = r.ink;
-      H.ribbonPath(ctx, pl, wFn, 0, r.tremor, r.closed);
-    } else if (isCustomBlend) {
-      applyCustomBlendRibbon(r.blend, (sctx) => {
-        sctx.fillStyle = r.ink;
-        H.ribbonPath(sctx, pl, wFn, 0, r.tremor, r.closed);
-        sctx.fill();
-      });
-      // outline strokes normally on the main canvas -- it's chrome/edge
-      // definition, not part of the blend-mode compositing.
-      ctx.fillStyle = r.ink;
-      H.ribbonPath(ctx, pl, wFn, 0, r.tremor, r.closed);
-    } else {
-      ctx.globalCompositeOperation = r.blend || 'source-over';
-      ctx.fillStyle = r.ink;
-      H.ribbonPath(ctx, pl, wFn, 0, r.tremor, r.closed);
-      ctx.fill();
-    }
-    if (r.outlineWidth > 0) {
-      // same path is still current -- stroking it right after filling
-      // traces the ribbon's outer silhouette, no engine change needed.
-      ctx.strokeStyle = r.outlineColor || '#1a1510';
-      ctx.lineWidth = Math.max(1, r.outlineWidth * minDim);
-      ctx.stroke();
-    }
-    ctx.globalCompositeOperation = 'source-over';
-
-    if (r.glow) {
-      ctx.globalCompositeOperation = 'lighter';
-      const coreWFn = (u) => H.widthAt(u, r.width * minDim * 0.35, r.taper, false, false);
-      H.ribbonPath(ctx, pl, coreWFn, 0, r.tremor, r.closed);
-      ctx.fill();
-      ctx.restore();
-    }
-
-    if (r.core) {
-      const coreWFn = (u) => H.widthAt(u, r.width * minDim * 0.16, r.taper, false, false);
-      ctx.fillStyle = r.core;
-      H.ribbonPath(ctx, pl, coreWFn, 0, r.tremor, r.closed);
-      ctx.fill();
-    }
-  });
-
-  postFX();
-
-  // ---- Editor chrome (segment highlights, point/bezier/width handles, sketch
-  // preview) -- skipped entirely in presentation/recording mode (#F) so a
-  // capture shows the clean artwork, exactly like it looks with nothing
-  // selected, regardless of what's mid-edit underneath. ----
-  if (!presenting) {
-  // ---- Control-polygon segment highlight (Group B #6), selected ribbon only ----
-  const sel = active.ribbons[selectedRibbon];
-  const spts = sel.points.map(p => ({ x: p.x * W, y: p.y * HGT }));
-  const segCount = sel.closed ? spts.length : spts.length - 1;
-  for (let i = 0; i < segCount; i++) {
-    if (i !== hoverSegment && i !== selectedSegment) continue;
-    const a = spts[i], b = spts[(i + 1) % spts.length];
-    ctx.beginPath();
-    ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
-    ctx.strokeStyle = i === selectedSegment ? '#ff4d4d' : '#c9a84c';
-    ctx.lineWidth = 3;
-    ctx.stroke();
-  }
-
-  // ---- Handles draw in a pass of their own, after every ribbon is filled --
-  // drawing them per-ribbon let later ribbons paint over earlier handles
-  // wherever paths cross. Only the selected ribbon's points show. ----
-  spts.forEach((p, i) => {
-    const isDragging = [...drags.values()].some(d => d.type === 'point' && d.point === i);
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
-    ctx.fillStyle = isDragging ? '#ff4d4d' : (selectedPoint && selectedPoint.point === i ? '#c9a84c' : '#ffffff');
-    ctx.fill();
-    ctx.strokeStyle = '#000000';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-  });
-
-  // ---- Bezier handle markers (Group B #8/#10) + the width handle (#215),
-  // selected point only ----
-  if (selectedPoint && selectedPoint.ribbon === selectedRibbon) {
-    const pt = sel.points[selectedPoint.point];
-    const base = spts[selectedPoint.point];
-    ['hOut', 'hIn'].forEach((k) => {
-      if (!pt[k]) return;
-      const hx = pt[k].x * W, hy = pt[k].y * HGT;
-      const isHandleDragging = [...drags.values()].some(d => d.type === 'handle' && d.point === selectedPoint.point && d.side === k);
-      ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(hx, hy);
-      ctx.strokeStyle = '#5f93a3'; ctx.lineWidth = 1; ctx.stroke();
-      ctx.fillStyle = isHandleDragging ? '#ff4d4d' : '#5f93a3';
-      ctx.fillRect(hx - 4, hy - 4, 8, 8);
-    });
-
-    const wh = widthHandlePos(sel, selectedPoint.point);
-    const isWidthDragging = [...drags.values()].some(d => d.type === 'width' && d.point === selectedPoint.point);
-    ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(wh.x, wh.y);
-    ctx.strokeStyle = '#c9744d'; ctx.lineWidth = 1; ctx.stroke();
-    ctx.beginPath(); ctx.arc(wh.x, wh.y, 5, 0, Math.PI * 2);
-    ctx.fillStyle = isWidthDragging ? '#ff4d4d' : '#c9744d';
-    ctx.fill();
-    ctx.strokeStyle = '#000000'; ctx.lineWidth = 1; ctx.stroke();
-  }
-
-  // ---- Sketch-in-progress stroke preview (Group B #11) ----
-  if (sketchMode.active && sketchMode.stroke.length > 1) {
-    ctx.beginPath();
-    ctx.moveTo(sketchMode.stroke[0].x, sketchMode.stroke[0].y);
-    sketchMode.stroke.forEach(p => ctx.lineTo(p.x, p.y));
-    ctx.strokeStyle = '#c9a84c';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-  }
-  }
-
-  // SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 1 AT1 / Phase 2 AT3: the
-  // real measured total, not just postFX's slice of it -- ribbon drawing
-  // and the new materials cost real time too, and stacking THOSE is exactly
-  // what the founder's original "gets laggy" complaint was about.
-  if (frameStatEl) {
-    const totalMs = performance.now() - _renderT0;
-    const postFxPart = lastPostFxMode ? ` · postFX ${lastPostFxMs.toFixed(1)}ms (${lastPostFxMode})` : '';
-    const errPart = lastMaterialError ? ` · ⚠ material error: ${lastMaterialError}` : '';
-    frameStatEl.textContent = `render ${totalMs.toFixed(1)}ms${postFxPart}${totalMs > 16.6 ? ' ⚠' : ''}${errPart}`;
-  }
-}
-
-// ============================================================
-// Pointer-driven interaction (canvas) -- Pointer Events, not mouse
-// events, so two simultaneous touches each drag a different target
-// (Group D #21).
-// ============================================================
-canvas.addEventListener('pointerdown', (e) => {
-  const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-
-  if (sketchMode.active) {
-    sketchMode.stroke = [{ x: mx, y: my }];
-    drags.set(e.pointerId, { type: 'sketch' });
-    canvas.setPointerCapture(e.pointerId);
-    return;
-  }
-
-  const handleSide = hitTestHandle(mx, my);
-  if (handleSide) {
-    const gp = active.ribbons[selectedRibbon].points[selectedPoint.point][handleSide];
-    drags.set(e.pointerId, {
-      type: 'handle', ribbon: selectedRibbon, point: selectedPoint.point, side: handleSide,
-      dx: gp.x * W - mx, dy: gp.y * HGT - my,
-    });
-    lastHandleSide = handleSide;
-    canvas.setPointerCapture(e.pointerId);
-    return;
-  }
-
-  if (hitTestWidthHandle(mx, my)) {
-    drags.set(e.pointerId, { type: 'width', ribbon: selectedRibbon, point: selectedPoint.point });
-    canvas.setPointerCapture(e.pointerId);
-    return;
-  }
-
-  // Point hit: try the primary ribbon first, then every other ribbon --
-  // clicking another curve while editing retargets the primary to it
-  // (founder S215), same as picking it from the "Editing" dropdown/list.
-  let pi = hitTestPoint(mx, my, selectedRibbon);
-  let targetRibbon = selectedRibbon;
-  if (pi < 0) {
-    for (let idx = 0; idx < active.ribbons.length; idx++) {
-      if (idx === selectedRibbon) continue;
-      const hit = hitTestPoint(mx, my, idx);
-      if (hit >= 0) { targetRibbon = idx; pi = hit; break; }
-    }
-  }
-  if (pi >= 0) {
-    if (targetRibbon !== selectedRibbon) setPrimaryRibbon(targetRibbon);
-    selectedPoint = { ribbon: targetRibbon, point: pi };
-    const gp = active.ribbons[targetRibbon].points[pi];
-    // founder S221 (SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 3 AT1): a
-    // plain click used to nudge whatever point it landed near, because
-    // pointermove wrote x/y on ANY movement from the instant pointerdown
-    // fired -- no click-vs-drag distinction existed. `moved` stays false
-    // (and position writes stay suppressed) until the pointer actually
-    // travels past CLICK_THRESHOLD_PX; a click that never crosses it only
-    // ever selects, exactly like it already did before this drag object
-    // was created a few lines up.
-    drags.set(e.pointerId, {
-      type: 'point', ribbon: targetRibbon, point: pi,
-      dx: gp.x * W - mx, dy: gp.y * HGT - my,
-      downX: mx, downY: my, moved: false,
-    });
-    canvas.setPointerCapture(e.pointerId);
-    render();
-    return;
-  }
-
-  let si = hitTestSegment(mx, my, selectedRibbon);
-  let segRibbon = selectedRibbon;
-  if (si < 0) {
-    for (let idx = 0; idx < active.ribbons.length; idx++) {
-      if (idx === selectedRibbon) continue;
-      const hit = hitTestSegment(mx, my, idx);
-      if (hit >= 0) { segRibbon = idx; si = hit; break; }
-    }
-  }
-  if (si >= 0 && segRibbon !== selectedRibbon) setPrimaryRibbon(segRibbon);
-  selectedSegment = si >= 0 ? si : null;
-  if (si < 0) selectedPoint = null;
-  render();
-});
-
-canvas.addEventListener('pointermove', (e) => {
-  const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-  const d = drags.get(e.pointerId);
-
-  if (d && d.type === 'sketch') {
-    const last = sketchMode.stroke[sketchMode.stroke.length - 1];
-    if (!last || Math.hypot(mx - last.x, my - last.y) > 8) sketchMode.stroke.push({ x: mx, y: my });
-    render();
-    return;
-  }
-  if (d && d.type === 'point') {
-    // founder S221, Phase 3 AT1: same threshold gate described where this
-    // drag object is created (pointerdown above) -- CLICK_THRESHOLD_PX of
-    // travel from the down position is what actually distinguishes "select"
-    // from "nudge," not just "did pointermove fire at all."
-    if (!d.moved && Math.hypot(mx - d.downX, my - d.downY) < CLICK_THRESHOLD_PX) return;
-    d.moved = true;
-    active.ribbons[d.ribbon].points[d.point].x = (mx + d.dx) / W;
-    active.ribbons[d.ribbon].points[d.point].y = (my + d.dy) / HGT;
-    render();
-    return;
-  }
-  if (d && d.type === 'handle') {
-    updateHandleDrag(d.ribbon, d.point, d.side, mx, my, d.dx, d.dy);
-    return;
-  }
-  if (d && d.type === 'width') {
-    const r = active.ribbons[d.ribbon];
-    const { base, nrm } = widthHandlePos(r, d.point);
-    const proj = (mx - base.x) * nrm.x + (my - base.y) * nrm.y;
-    r.points[d.point].widthMult = Math.max(0.15, Math.min(3, (proj - WIDTH_HANDLE_BASE) / WIDTH_HANDLE_SCALE));
-    render();
-    return;
-  }
-  if (!d) {
-    const si = hitTestSegment(mx, my, selectedRibbon);
-    if (si !== hoverSegment) { hoverSegment = si; render(); }
-  }
-});
-
-canvas.addEventListener('pointerup', (e) => {
-  const d = drags.get(e.pointerId);
-  if (d && d.type === 'sketch') finalizeSketch();
-  drags.delete(e.pointerId);
-  render();
-});
-canvas.addEventListener('pointercancel', (e) => { drags.delete(e.pointerId); });
-
-// founder S221 (SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 3 AT2):
-// double-click always selects/retargets, with zero risk of ever nudging a
-// point -- unlike pointerdown's point-hit branch above, this never touches
-// `drags` at all, so there's no drag object for any stray pointer movement
-// between the two clicks to act on. Same targeting cascade (point hit on
-// the primary ribbon, then every other ribbon; segment hit as a fallback)
-// as pointerdown, but selection-only.
-canvas.addEventListener('dblclick', (e) => {
-  const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-
-  let pi = hitTestPoint(mx, my, selectedRibbon);
-  let targetRibbon = selectedRibbon;
-  if (pi < 0) {
-    for (let idx = 0; idx < active.ribbons.length; idx++) {
-      if (idx === selectedRibbon) continue;
-      const hit = hitTestPoint(mx, my, idx);
-      if (hit >= 0) { targetRibbon = idx; pi = hit; break; }
-    }
-  }
-  if (pi >= 0) {
-    if (targetRibbon !== selectedRibbon) setPrimaryRibbon(targetRibbon);
-    selectedPoint = { ribbon: targetRibbon, point: pi };
-    render();
-    return;
-  }
-
-  let si = hitTestSegment(mx, my, selectedRibbon);
-  let segRibbon = selectedRibbon;
-  if (si < 0) {
-    for (let idx = 0; idx < active.ribbons.length; idx++) {
-      if (idx === selectedRibbon) continue;
-      const hit = hitTestSegment(mx, my, idx);
-      if (hit >= 0) { segRibbon = idx; si = hit; break; }
-    }
-  }
-  if (si >= 0) {
-    if (segRibbon !== selectedRibbon) setPrimaryRibbon(segRibbon);
-    selectedSegment = si;
-    render();
-  }
-});
-
-// #7: live subdivision of the selected segment via mouse-wheel.
-canvas.addEventListener('wheel', (e) => {
-  if (selectedSegment === null) return;
-  e.preventDefault();
-  const r = active.ribbons[selectedRibbon];
-  const n = r.points.length;
-  if (e.deltaY < 0) {
-    const a = r.points[selectedSegment], b = r.points[(selectedSegment + 1) % n];
-    r.points.splice(selectedSegment + 1, 0, { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
-  } else if (n > 3) {
-    r.points.splice((selectedSegment + 1) % n, 1);
-    selectedSegment = Math.min(selectedSegment, r.points.length - (r.closed ? 1 : 2));
-  }
-  render();
-}, { passive: false });
-
-// #8 align / #10 tied-untied / handle toggle -- act on the selected point.
-window.addEventListener('keydown', (e) => {
-  if (!selectedPoint || selectedPoint.ribbon !== selectedRibbon) return;
-  const r = active.ribbons[selectedRibbon];
-  const pt = r.points[selectedPoint.point];
-  if (e.key === 'h' || e.key === 'H') {
-    if (pt.hOut || pt.hIn) { delete pt.hOut; delete pt.hIn; }
-    else addDefaultHandles(r, selectedPoint.point);
-    render();
-  } else if (e.key === 'k' || e.key === 'K') {
-    alignSelectedPoint();
-  } else if (e.key === 't' || e.key === 'T') {
-    pt.tied = pt.tied === false ? true : false;
-  } else if (e.key === 'w' || e.key === 'W') {
-    delete pt.widthMult;
-    render();
-  }
-});
-
-// ============================================================
-// Presentation / recording mode (#F): hide the sidebar, canvas fills the
-// window, editor chrome stops drawing (render()'s `if (!presenting)` block).
-// Also requests real OS fullscreen where available (falls back silently --
-// Tauri's webview may deny it) so a screen recording has zero chrome outside
-// the artwork either way.
-// ============================================================
-const presentToggle = document.getElementById('present-toggle');
-function setPresenting(on) {
-  presenting = on;
-  document.body.classList.toggle('presenting', on);
-  resize();
-  render();
-  if (on && document.documentElement.requestFullscreen) {
-    document.documentElement.requestFullscreen().catch(() => {});
-  } else if (!on && document.fullscreenElement) {
-    document.exitFullscreen().catch(() => {});
-  }
-}
-presentToggle.addEventListener('click', () => setPresenting(!presenting));
-document.addEventListener('fullscreenchange', () => {
-  if (!document.fullscreenElement && presenting) setPresenting(false);
-});
-window.addEventListener('keydown', (e) => {
-  const tag = document.activeElement && document.activeElement.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-  if (e.key === 'f' || e.key === 'F') setPresenting(!presenting);
-  else if (e.key === 'Escape' && presenting) setPresenting(false);
-});
-
-// ============================================================
-// 2D joystick pads (Group D #20) -- pointer events, independent of the
-// canvas's own pointer tracking, so a pad drag and a canvas drag can
-// run from two different fingers at once.
-// ============================================================
-function wirePad(padEl, paramX, paramY, rangeX, rangeY) {
-  const dot = padEl.querySelector('.pad-dot');
-  function setFromEvent(e) {
-    const rect = padEl.getBoundingClientRect();
-    const rx = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const ry = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
-    const r = active.ribbons[selectedRibbon];
-    r[paramX] = rangeX[0] + rx * (rangeX[1] - rangeX[0]);
-    r[paramY] = rangeY[0] + ry * (rangeY[1] - rangeY[0]);
-    dot.style.left = (rx * 100) + '%';
-    dot.style.top = (ry * 100) + '%';
-    render();
-    if (pane) pane.refresh();
-    scheduleSync();
-  }
-  padEl.addEventListener('pointerdown', (e) => { padEl.setPointerCapture(e.pointerId); setFromEvent(e); });
-  padEl.addEventListener('pointermove', (e) => { if (e.buttons) setFromEvent(e); });
-}
-wirePad(document.getElementById('pad-width-taper'), 'width', 'taper', [0.01, 0.2], [0.02, 0.3]);
-wirePad(document.getElementById('pad-gap-tremor'), 'gap', 'tremor', [0, 0.03], [0, 0.1]);
-
-// ============================================================
-// Real draggable tone-curve graph (replaces the earlier 3-slider stand-in,
-// per founder instruction to finish it properly) -- click empty space to
-// add a point (max 8), drag any point, points stay sorted by x so the LUT
-// build in postFX() always walks a monotonic-in-x point list.
-// ============================================================
-const curveCanvas = document.getElementById('curve-graph');
-const curveCtx = curveCanvas.getContext('2d');
-let curveDrag = null;
-let curveDragDx = 0, curveDragDy = 0; // grab offset (screen px), set on pointerdown
-function drawCurveGraph() {
-  const w = curveCanvas.width, h = curveCanvas.height;
-  curveCtx.fillStyle = '#f5efe2';
-  curveCtx.fillRect(0, 0, w, h);
-  curveCtx.strokeStyle = 'rgba(160,140,110,0.3)';
-  curveCtx.lineWidth = 1;
-  curveCtx.beginPath(); curveCtx.moveTo(0, h); curveCtx.lineTo(w, 0); curveCtx.stroke();
-
-  const lut = buildCurveLUT(adj.curvePoints);
-  curveCtx.beginPath();
-  for (let x = 0; x < w; x++) {
-    const i = Math.min(255, Math.round((x / w) * 255));
-    const y = h - (lut[i] / 255) * h;
-    if (x === 0) curveCtx.moveTo(x, y); else curveCtx.lineTo(x, y);
-  }
-  curveCtx.strokeStyle = '#c9a84c';
-  curveCtx.lineWidth = 2;
-  curveCtx.stroke();
-
-  adj.curvePoints.forEach((p, i) => {
-    curveCtx.beginPath();
-    curveCtx.arc(p.x * w, h - p.y * h, 5, 0, Math.PI * 2);
-    curveCtx.fillStyle = curveDrag === i ? '#ff4d4d' : '#1a1510';
-    curveCtx.fill();
-  });
-}
-function curvePointAt(mx, my) {
-  const w = curveCanvas.width, h = curveCanvas.height;
-  let best = -1, bestD = 12;
-  adj.curvePoints.forEach((p, i) => {
-    const d = Math.hypot(mx - p.x * w, my - (h - p.y * h));
-    if (d < bestD) { bestD = d; best = i; }
-  });
-  return best;
-}
-curveCanvas.addEventListener('pointerdown', (e) => {
-  const rect = curveCanvas.getBoundingClientRect();
-  const scaleX = curveCanvas.width / rect.width, scaleY = curveCanvas.height / rect.height;
-  const mx = (e.clientX - rect.left) * scaleX, my = (e.clientY - rect.top) * scaleY;
-  const hit = curvePointAt(mx, my);
-  if (hit >= 0) {
-    curveDrag = hit;
-    const gp = adj.curvePoints[hit];
-    // screen-space grab offset; y is inverted (screen y = h - p.y*h)
-    curveDragDx = gp.x * curveCanvas.width - mx;
-    curveDragDy = (curveCanvas.height - gp.y * curveCanvas.height) - my;
-    curveCanvas.setPointerCapture(e.pointerId);
-  } else if (adj.curvePoints.length < 8) {
-    const nx = Math.max(0, Math.min(1, mx / curveCanvas.width));
-    const ny = Math.max(0, Math.min(1, 1 - my / curveCanvas.height));
-    adj.curvePoints.push({ x: nx, y: ny });
-    adj.curvePoints.sort((a, b) => a.x - b.x);
-    drawCurveGraph();
-    render();
-    scheduleSync();
-  }
-});
-curveCanvas.addEventListener('pointermove', (e) => {
-  if (curveDrag === null) return;
-  const rect = curveCanvas.getBoundingClientRect();
-  const scaleX = curveCanvas.width / rect.width, scaleY = curveCanvas.height / rect.height;
-  const mx = (e.clientX - rect.left) * scaleX, my = (e.clientY - rect.top) * scaleY;
-  const nx = Math.max(0, Math.min(1, (mx + curveDragDx) / curveCanvas.width));
-  const ny = Math.max(0, Math.min(1, 1 - (my + curveDragDy) / curveCanvas.height));
-  adj.curvePoints[curveDrag] = { x: nx, y: ny };
-  drawCurveGraph();
-  render();
-  scheduleSync();
-});
-window.addEventListener('pointerup', (e) => {
-  if (curveDrag === null) return;
-  adj.curvePoints.sort((a, b) => a.x - b.x);
-  curveDrag = null;
-  drawCurveGraph();
-  scheduleSync();
-});
-drawCurveGraph();
-
-// ============================================================
-// The 11 Procreate blend modes with no native Canvas2D
-// globalCompositeOperation equivalent (Batch 2, "do not hold back" pass).
-// Each ribbon using one of these renders its ink shape to an offscreen
-// scratch canvas first, then blends it into the main canvas pixel-by-pixel
-// with the real formula -- the 14 native modes still use the free,
-// fast ctx.globalCompositeOperation path.
-// ============================================================
-const CUSTOM_BLEND_NAMES = new Set([
-  'Shade', 'Add', 'Lighter Color', 'Darker Color', 'Vivid Light',
-  'Linear Light', 'Pin Light', 'Hard Mix', 'Linear Burn', 'Subtract', 'Divide',
-]);
-Object.assign(BLEND_MODES, {
-  Shade: 'Shade', Add: 'Add', 'Lighter Color': 'Lighter Color', 'Darker Color': 'Darker Color',
-  'Vivid Light': 'Vivid Light', 'Linear Light': 'Linear Light', 'Pin Light': 'Pin Light',
-  'Hard Mix': 'Hard Mix', 'Linear Burn': 'Linear Burn', Subtract: 'Subtract', Divide: 'Divide',
-});
-let blendScratch = null;
-function getBlendScratch() {
-  if (!blendScratch || blendScratch.width !== canvas.width || blendScratch.height !== canvas.height) {
-    blendScratch = document.createElement('canvas');
-    blendScratch.width = canvas.width;
-    blendScratch.height = canvas.height;
-  }
-  return blendScratch;
-}
-function customBlendChannel(mode, b, s) {
-  switch (mode) {
-    case 'Shade': return Math.min(b, s);
-    case 'Add': return Math.min(255, b + s);
-    case 'Vivid Light':
-      return s < 128
-        ? (s === 0 ? 0 : Math.max(0, 255 - Math.min(255, ((255 - b) * 255) / (2 * s))))
-        : (s === 255 ? 255 : Math.min(255, (b * 255) / (2 * (255 - s))));
-    case 'Linear Light': return Math.max(0, Math.min(255, b + 2 * s - 255));
-    case 'Pin Light': return s < 128 ? Math.min(b, 2 * s) : Math.max(b, 2 * (s - 128));
-    case 'Hard Mix': return b + s >= 255 ? 255 : 0;
-    case 'Linear Burn': return Math.max(0, b + s - 255);
-    case 'Subtract': return Math.max(0, b - s);
-    case 'Divide': return s === 0 ? 255 : Math.min(255, (b / s) * 255);
-    default: return s;
-  }
-}
-function applyCustomBlendRibbon(mode, drawFn) {
-  const scratch = getBlendScratch();
-  const sctx = scratch.getContext('2d');
-  sctx.clearRect(0, 0, scratch.width, scratch.height);
-  drawFn(sctx);
-
-  const base = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const blend = sctx.getImageData(0, 0, scratch.width, scratch.height);
-  const bd = base.data, sd = blend.data;
-  const wholePixel = mode === 'Lighter Color' || mode === 'Darker Color';
-
-  for (let i = 0; i < sd.length; i += 4) {
-    const a = sd[i + 3];
-    if (a === 0) continue;
-    const sa = a / 255;
-    if (wholePixel) {
-      const baseLum = bd[i] + bd[i + 1] + bd[i + 2];
-      const srcLum = sd[i] + sd[i + 1] + sd[i + 2];
-      const pick = mode === 'Lighter Color' ? srcLum > baseLum : srcLum < baseLum;
-      if (pick) {
-        bd[i] += (sd[i] - bd[i]) * sa;
-        bd[i + 1] += (sd[i + 1] - bd[i + 1]) * sa;
-        bd[i + 2] += (sd[i + 2] - bd[i + 2]) * sa;
-      }
-    } else {
-      for (let c = 0; c < 3; c++) {
-        const blended = customBlendChannel(mode, bd[i + c], sd[i + c]);
-        bd[i + c] += (blended - bd[i + c]) * sa;
-      }
-    }
-  }
-  ctx.putImageData(base, 0, 0);
-}
-
-// ============================================================
-// Wireless controller networking (#215). The desktop app and a phone opening
-// ?controller both load this exact file and both connect to the same
-// embedded WS relay (src-tauri/src/server.rs, port 8917 -- desktop always
-// via 127.0.0.1 since the server runs in-process; the phone via whatever LAN/
-// Tailscale host it typed in, so location.hostname is already right there).
-// The relay does no interpretation: whoever last sent a `{active, adj, fx}`
-// blob wins, and it's rebroadcast to every other connected client. A device
-// ignores an incoming message that's byte-identical to the last one IT sent,
-// so its own edit doesn't bounce back and rebuild the panel mid-drag.
-// ============================================================
-let ws = null;
-let lastSentJSON = null;
-let syncTimer = null;
-function sendState() {
-  if (!ws || ws.readyState !== WebSocket.OPEN || !active) return;
-  const payload = JSON.stringify({ active, adj, fx });
-  lastSentJSON = payload;
-  ws.send(payload);
-}
-function scheduleSync() {
-  if (syncTimer) return;
-  syncTimer = setTimeout(() => { syncTimer = null; sendState(); }, 60);
-}
-function applyRemoteState(payload) {
-  if (payload.active) {
-    active = payload.active;
-    selectedRibbon = Math.min(selectedRibbon, active.ribbons.length - 1);
-    multiSelect = new Set([...multiSelect].filter(i => i < active.ribbons.length));
-    if (multiSelect.size === 0) multiSelect.add(selectedRibbon);
-  }
-  if (payload.adj) Object.assign(adj, payload.adj);
-  if (payload.fx) Object.assign(fx, payload.fx);
+setPaneRefreshHook(() => { if (pane) pane.refresh(); });
+setRemoteApplyHook(() => {
   if (pane) buildPane();
   renderRibbonList();
   drawCurveGraph();
-  render();
-}
-function connectWS() {
-  const host = isController ? location.hostname : '127.0.0.1';
-  ws = new WebSocket(`ws://${host}:8917/ws`);
-  ws.addEventListener('message', (ev) => {
-    if (ev.data === lastSentJSON) return; // ignore our own echo
-    try { applyRemoteState(JSON.parse(ev.data)); } catch { /* malformed/partial frame -- drop it */ }
-  });
-  ws.addEventListener('close', () => { ws = null; setTimeout(connectWS, 1500); });
-  ws.addEventListener('error', () => { try { ws.close(); } catch { /* already closing */ } });
-  if (!isController) ws.addEventListener('open', () => sendState(), { once: true });
-}
+});
+
+initInteractions(buildCurveLUT);
 connectWS();
 
 if (!isController && window.__TAURI__) {
@@ -1746,11 +332,18 @@ if (!isController && window.__TAURI__) {
 }
 
 // ---- Piece switcher ----
-PIECES.forEach(p => {
+PIECES.forEach((p) => {
   const opt = document.createElement('option');
   opt.value = p.id; opt.textContent = p.name;
   pieceSelect.appendChild(opt);
 });
-pieceSelect.addEventListener('change', () => loadPiece(pieceSelect.value));
+pieceSelect.addEventListener('change', () => {
+  loadPiece(pieceSelect.value);
+  buildPane();
+  renderRibbonList();
+});
 
 loadPiece(PIECES[0].id);
+buildPane();
+renderRibbonList();
+drawCurveGraph();
