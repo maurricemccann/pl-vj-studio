@@ -4,12 +4,16 @@ import { state } from '../core/store.js';
 import { RibbonList } from './RibbonList.jsx';
 import { TabRail } from './TabRail.jsx';
 import { RibbonPanel } from './panels/RibbonPanel.jsx';
+import { AnimationPanel } from './panels/AnimationPanel.jsx';
 import { Placeholder } from './panels/Placeholder.jsx';
 
-// SPEC — PL THIRD EYE VJ STUDIO SETTINGS PANEL REDESIGN, Phase A: the
+const PANELS = { ribbon: RibbonPanel, animation: AnimationPanel };
+
+// SPEC — PL THIRD EYE VJ STUDIO SETTINGS PANEL REDESIGN, Phase A + B: the
 // navigation shell -- persistent Ribbon List -> vertical icon-tab rail ->
 // single-category property view with a search box, filling the remaining
-// space. Ribbon tab is fully real; the other 5 are placeholders this phase.
+// space. Ribbon + Animation tabs are fully real; Curve/Modulation/
+// Adjustments/Effects are placeholders, built in later phases.
 export function App() {
   const [tab, setTab] = useState('ribbon');
   const [search, setSearch] = useState('');
@@ -30,7 +34,7 @@ export function App() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
-          {tab === 'ribbon' ? <RibbonPanel search={search} /> : <Placeholder tab={tab} />}
+          {PANELS[tab] ? (() => { const Panel = PANELS[tab]; return <Panel search={search} />; })() : <Placeholder tab={tab} />}
         </div>
       </div>
     </div>
