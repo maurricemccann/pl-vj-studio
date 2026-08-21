@@ -87,3 +87,4 @@
 .pl-action-row button { flex: 1; font-size: 11px; padding: 5px 8px; background: #ece2cc; border: 1px solid rgba(160,140,110,0.35); border-radius: 5px; color: #1a1510; cursor: pointer; font-family: inherit; box-shadow: 0 1px 1px rgba(255,255,255,0.5) inset; transition: background 0.15s ease; }
 .pl-action-row button:hover:not(:disabled) { background: #e4d5ac; }
 .pl-action-row button:disabled { opacity: 0.4; cursor: default; }
+.pl-hint-text { font-size: 10px; color: #6b5d48; line-height: 1.5; margin: 6px 0 0; }
