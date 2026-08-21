@@ -55,21 +55,23 @@
    ~20-character intrinsic width forces the whole row (and the 280px
    sidebar) to overflow horizontally. Same fix applied to color/dropdown
    rows below. */
-.pl-slider-row { display: grid; grid-template-columns: 84px 1fr 46px; align-items: center; gap: 8px; }
+.pl-slider-row { display: grid; grid-template-columns: 60px 1fr 40px; align-items: center; gap: 8px; }
 .pl-slider-label { font-size: 11px; color: #6b5d48; }
-.pl-slider-track { position: relative; height: 18px; min-width: 0; background: #f5efe2; border: 1px solid rgba(160,140,110,0.35); border-radius: 5px; cursor: ew-resize; touch-action: none; box-shadow: inset 0 2px 4px rgba(26,21,16,0.08); overflow: hidden; }
+.pl-slider-track { position: relative; height: 26px; min-width: 0; background: #f5efe2; border: 1px solid rgba(160,140,110,0.35); border-radius: 7px; cursor: pointer; touch-action: none; box-shadow: inset 0 2px 4px rgba(26,21,16,0.08); }
 .pl-slider-track.dragging { border-color: #c9a84c; }
-.pl-slider-fill { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(201,168,76,0.4); pointer-events: none; }
+.pl-slider-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 7px 0 0 7px; background: rgba(201,168,76,0.4); pointer-events: none; }
+.pl-slider-thumb { position: absolute; top: 50%; width: 14px; height: 14px; border-radius: 50%; background: #fdf9f1; border: 2px solid #c9a84c; box-shadow: 0 1px 3px rgba(26,21,16,0.3); transform: translate(-50%, -50%); pointer-events: none; transition: transform 0.05s ease; }
+.pl-slider-track.dragging .pl-slider-thumb { transform: translate(-50%, -50%) scale(1.15); }
 .pl-slider-value { font-size: 11px; text-align: right; color: #1a1510; font-variant-numeric: tabular-nums; cursor: text; }
 .pl-slider-input { width: 46px; font-size: 11px; text-align: right; padding: 2px 4px; border: 1px solid #c9a84c; border-radius: 4px; background: #fdf9f1; color: #1a1510; font-family: inherit; }
 
 /* ---- Color field ---- */
-.pl-color-row { display: grid; grid-template-columns: 84px 24px minmax(66px, 1fr); align-items: center; gap: 8px; }
+.pl-color-row { display: grid; grid-template-columns: 60px 24px minmax(66px, 1fr); align-items: center; gap: 8px; }
 .pl-color-swatch { width: 24px; height: 20px; padding: 0; border: 1px solid rgba(160,140,110,0.35); border-radius: 4px; background: none; cursor: pointer; }
 .pl-color-hex { width: 100%; min-width: 0; box-sizing: border-box; font-size: 11px; padding: 3px 6px; border: 1px solid rgba(160,140,110,0.35); border-radius: 4px; background: #fdf9f1; color: #1a1510; font-family: inherit; }
 
 /* ---- Dropdown (custom-styled, not the raw <select>) ---- */
-.pl-dropdown-row { display: grid; grid-template-columns: 84px 1fr; align-items: center; gap: 8px; }
+.pl-dropdown-row { display: grid; grid-template-columns: 60px 1fr; align-items: center; gap: 8px; }
 .pl-dropdown { position: relative; min-width: 0; }
 .pl-dropdown-trigger { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 5px 8px; font-size: 11px; background: #fdf9f1; border: 1px solid rgba(160,140,110,0.35); border-radius: 5px; color: #1a1510; cursor: pointer; font-family: inherit; }
 .pl-dropdown-trigger:hover { background: #f5efe2; }
@@ -79,7 +81,7 @@
 .pl-dropdown-item.selected { background: rgba(201,168,76,0.3); font-weight: 600; }
 
 /* ---- Checkbox row (Glow) ---- */
-.pl-checkbox-row { display: grid; grid-template-columns: 84px 1fr; align-items: center; gap: 8px; cursor: pointer; }
+.pl-checkbox-row { display: grid; grid-template-columns: 60px 1fr; align-items: center; gap: 8px; cursor: pointer; }
 
 /* ---- Panel section heading + action-button row (Animation tab) ---- */
 .pl-panel-section { font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; color: #8a7235; opacity: 0.75; margin: 6px 0 -2px; }

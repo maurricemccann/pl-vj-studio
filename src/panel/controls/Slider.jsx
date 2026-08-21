@@ -1,12 +1,14 @@
 import { useRef, useState } from 'react';
 
-// SPEC — PL THIRD EYE VJ STUDIO SETTINGS PANEL REDESIGN, Design section 2:
-// custom slider -- per-parameter sensitivity (drag delta scaled by the
-// param's own range, not a raw 1:1 pixel mapping), Shift+drag = fine-adjust
-// (sensitivity / 8), double-click the number = type an exact value,
-// scroll-wheel nudges by one step, live numeric readout during drag.
-const CLICK_THRESHOLD_PX = 4;
-
+// Founder correction, 2026-08-20: the original design (relative drag-delta,
+// scaled sensitivity, never jumps to where you click) tested badly in real
+// use -- "sliders are too small and I have to type it." Rebuilt as a normal
+// click/drag-to-position slider, like every native OS/DAW/design-tool
+// slider: click or drag anywhere on the track and the value jumps straight
+// there. Shift+drag switches to fine relative-adjust from wherever the drag
+// currently is (rolling anchor -- toggling Shift mid-drag never jumps).
+// Double-click the number to type an exact value and scroll-wheel nudges by
+// one step both stay, unchanged.
 function clampStep(v, min, max, step) {
   const snapped = Math.round((v - min) / step) * step + min;
   return Math.max(min, Math.min(max, snapped));
@@ -14,6 +16,11 @@ function clampStep(v, min, max, step) {
 function fmt(v, step) {
   const decimals = step < 1 ? String(step).split('.')[1]?.length ?? 3 : 0;
   return Number(v).toFixed(Math.min(decimals, 4));
+}
+function valueAtPointer(e, trackEl, min, max, step) {
+  const rect = trackEl.getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  return clampStep(min + pct * (max - min), min, max, step);
 }
 
 export function Slider({ label, value, min, max, step = 0.01, onChange }) {
@@ -28,18 +35,24 @@ export function Slider({ label, value, min, max, step = 0.01, onChange }) {
   function onPointerDown(e) {
     if (editing) return;
     trackRef.current.setPointerCapture(e.pointerId);
-    dragRef.current = { startX: e.clientX, startValue: value, moved: false };
+    const nv = valueAtPointer(e, trackRef.current, min, max, step);
+    onChange(nv);
+    dragRef.current = { lastX: e.clientX, lastValue: nv };
     setDragging(true);
   }
   function onPointerMove(e) {
     const d = dragRef.current;
     if (!d) return;
-    const dx = e.clientX - d.startX;
-    if (!d.moved && Math.abs(dx) < CLICK_THRESHOLD_PX) return;
-    d.moved = true;
-    const sensitivity = (max - min) / (e.shiftKey ? 2400 : 300); // Shift = fine-adjust
-    const nv = clampStep(d.startValue + dx * sensitivity, min, max, step);
+    let nv;
+    if (e.shiftKey) {
+      const sensitivity = (max - min) / 2400; // fine-adjust, relative to wherever the drag is now
+      nv = clampStep(d.lastValue + (e.clientX - d.lastX) * sensitivity, min, max, step);
+    } else {
+      nv = valueAtPointer(e, trackRef.current, min, max, step); // click/drag-to-position, like a native slider
+    }
     onChange(nv);
+    d.lastX = e.clientX;
+    d.lastValue = nv;
   }
   function onPointerUp(e) {
     trackRef.current.releasePointerCapture(e.pointerId);
@@ -73,6 +86,7 @@ export function Slider({ label, value, min, max, step = 0.01, onChange }) {
         onWheel={onWheel}
       >
         <div className="pl-slider-fill" style={{ width: (pct * 100) + '%' }} />
+        <div className="pl-slider-thumb" style={{ left: (pct * 100) + '%' }} />
       </div>
       {editing ? (
         <input
