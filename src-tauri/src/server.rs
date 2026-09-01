@@ -112,6 +112,14 @@ pub async fn start() {
         .route("/main.js", get(|| async { js(include_str!("../../src/main.js")) }))
         .route("/engine.js", get(|| async { js(include_str!("../../src/engine.js")) }))
         .route("/pieces.js", get(|| async { js(include_str!("../../src/pieces.js")) }))
+        // Bare-hands ribbon control (S218 spec, built 2026-08-31). A standalone
+        // tracker page: opens a webcam, runs MediaPipe Hands, and drives ribbon
+        // params over the SAME /ws relay the phone controller uses. Nothing in
+        // engine.js or the desktop window changes; close the page and nothing
+        // degrades. Served over the LAN, so it runs on whichever device opens
+        // it -- laptop webcam or phone camera, decided per session.
+        .route("/hands.html", get(|| async { html(include_str!("../../src/hands.html")) }))
+        .route("/hands.js", get(|| async { js(include_str!("../../src/hands.js")) }))
         // Pre-existing bug found live-testing the phone/controller path for
         // Phase A (house rule: render it, don't just read the code) -- these
         // two routes were never added when Phase 2 shipped ribbon-materials.js

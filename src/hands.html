@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Hands · PL VJ Studio</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100dvh; background: #0b0b0d; color: #e8e6e1;
+    font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+  }
+  h1 { font-size: 13px; letter-spacing: .16em; text-transform: uppercase;
+       color: #b8ae9a; margin: 4px 0 0; font-weight: 500; }
+  /* Mirrored so moving your hand right moves it right on screen. */
+  video { width: min(100%, 520px); border-radius: 12px; transform: scaleX(-1);
+          background: #000; aspect-ratio: 4/3; object-fit: cover; }
+  .status { font-size: 12px; letter-spacing: .04em; padding: 7px 14px;
+            border-radius: 999px; background: #1a1a1f; border: 1px solid #2a2a31; }
+  .status.ok   { color: #7fd6a3; border-color: #2c4436; }
+  .status.warn { color: #e0c07a; border-color: #46402c; }
+  .status.err  { color: #e08a8a; border-color: #4a2e2e; }
+  #readout { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+             font-size: 11px; color: #8b8578; text-align: center; min-height: 1.5em; }
+  .map { max-width: 520px; width: 100%; border-top: 1px solid #22222a; padding-top: 12px; }
+  .map table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .map td { padding: 4px 0; vertical-align: top; }
+  .map td:first-child { color: #b8ae9a; white-space: nowrap; padding-right: 14px; }
+  .map td:last-child { color: #7d7a72; }
+  .note { max-width: 520px; font-size: 11px; color: #6f6a60; }
+</style>
+</head>
+<body>
+  <h1>Hand Control</h1>
+  <video id="cam" playsinline muted></video>
+  <div id="status" class="status">starting…</div>
+  <div id="readout"></div>
+
+  <div class="map">
+    <table>
+      <tr><td>Pinch</td><td>width</td></tr>
+      <tr><td>Hand height</td><td>taper</td></tr>
+      <tr><td>Hand roll</td><td>tremor</td></tr>
+      <tr><td>Two-hand spread</td><td>gap</td></tr>
+      <tr><td>Open palm, 1s</td><td>next ribbon</td></tr>
+      <tr><td>Fist</td><td>freeze</td></tr>
+    </table>
+  </div>
+
+  <p class="note">
+    Landmarks never leave this page — only ribbon parameters go to the studio.
+    Drop your hands or walk out of frame and the piece holds its last state.
+  </p>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  <script type="module" src="/hands.js"></script>
+</body>
+</html>
