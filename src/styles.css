@@ -30,38 +30,21 @@ html, body {
   border: 1px solid rgba(160,140,110,0.35); border-radius: 6px; font-size: 13px;
   font-family: 'DM Sans', system-ui, sans-serif;
 }
-#panel {
-  flex: 1;
-  /* Tweakpane's real public theming API (30 --tp-* custom properties,
-     confirmed in the vendored bundle's .tp-rotv rule) -- no edits to
-     vendor/tweakpane.js. Replaces its default dark/monospace theme with
-     the house cream/gold system so the panel stops clashing with the
-     sidebar chrome around it. */
-  --tp-base-background-color: #f5efe2;
-  --tp-base-border-radius: 6px;
-  --tp-base-font-family: 'DM Sans', system-ui, sans-serif;
-  --tp-base-shadow-color: rgba(26, 21, 16, 0.12);
-  --tp-blade-border-radius: 4px;
-  --tp-button-background-color: #ece2cc;
-  --tp-button-background-color-active: #c9a84c;
-  --tp-button-background-color-focus: #ddca9c;
-  --tp-button-background-color-hover: #e4d5ac;
-  --tp-button-foreground-color: #1a1510;
-  --tp-container-background-color: rgba(160, 140, 110, 0.08);
-  --tp-container-background-color-active: rgba(201, 168, 76, 0.25);
-  --tp-container-background-color-focus: rgba(201, 168, 76, 0.18);
-  --tp-container-background-color-hover: rgba(160, 140, 110, 0.14);
-  --tp-container-foreground-color: #1a1510;
-  --tp-input-background-color: #fdf9f1;
-  --tp-input-background-color-active: #f0e6cf;
-  --tp-input-background-color-focus: #f5edd8;
-  --tp-input-background-color-hover: #f7f1e4;
-  --tp-input-foreground-color: #1a1510;
-  --tp-label-foreground-color: #6b5d48;
-  --tp-monitor-background-color: rgba(160, 140, 110, 0.1);
-  --tp-monitor-foreground-color: #1a1510;
-  --tp-groove-foreground-color: rgba(160, 140, 110, 0.28);
-}
+#panel { flex: 1; }
+
+/* SPEC — PL THIRD EYE VJ STUDIO SETTINGS PANEL REDESIGN, Phase C AT4: the
+   phone controller's own React entry (src/controller/main.js), native
+   <input>/<select> rows -- Tweakpane's --tp-* theming API is gone with it. */
+.ctl-folder-title { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: #8a7235; font-weight: 600; margin-bottom: 6px; }
+.ctl-row { display: grid; grid-template-columns: 92px 1fr 44px; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; }
+.ctl-row label { color: #6b5d48; }
+.ctl-row input[type="range"] { width: 100%; }
+.ctl-row input[type="color"] { width: 100%; height: 24px; padding: 0; border: 1px solid rgba(160,140,110,0.35); border-radius: 4px; background: none; }
+.ctl-row select { grid-column: 2 / span 2; padding: 4px 6px; background: #fdf9f1; border: 1px solid rgba(160,140,110,0.35); border-radius: 5px; color: #1a1510; font-family: inherit; font-size: 12px; }
+.ctl-value { text-align: right; font-variant-numeric: tabular-nums; color: #1a1510; }
+.ctl-action-row { margin-bottom: 6px; }
+.ctl-action-row button { font-size: 11px; padding: 5px 8px; background: #ece2cc; border: 1px solid rgba(160,140,110,0.35); border-radius: 5px; color: #1a1510; cursor: pointer; font-family: inherit; }
+.ctl-action-row button:hover { background: #e4d5ac; }
 
 /* SPEC — PL THIRD EYE VJ STUDIO REBUILD, Phase 4: shared "instrument
    module" card shell -- founder-approved direction (/design canvas

@@ -4,7 +4,7 @@
 // camera, preset A/B morph), plus the WS sync protocol -- extracted verbatim
 // (behavior unchanged, only location + a bump()/hook wiring added) out of the
 // old monolithic main.js so BOTH the phone/Tailscale controller entry
-// (main.js, unchanged role, still raw-served by src-tauri/src/server.rs via
+// (src/controller/main.js, raw-served by src-tauri/src/server.rs via
 // include_str! -- so this file MUST stay plain relative-import JS, no bare
 // package specifiers, nothing that needs a bundler) and the new Vite/React
 // desktop entry (src/panel/main.jsx) can read/drive the exact same live
@@ -81,25 +81,19 @@ export const state = {
 // object (mutating in place never changes reference identity, so React would
 // never have re-rendered on it). bump() is called once, from inside render()
 // -- render() already runs after every mutation across the whole app (every
-// Tweakpane binding, every pointer handler, all 6 RAF loops, remote-state
-// apply), so tapping that one existing choke point is both correct and the
-// minimal-risk way to wire every mutation site without hunting each one by
-// hand.
+// control on both the desktop React panel and the phone controller, every
+// pointer handler, all 6 RAF loops, remote-state apply), so tapping that one
+// existing choke point is both correct and the minimal-risk way to wire
+// every mutation site without hunting each one by hand. (Tweakpane's own
+// pane.refresh()/rebuild hooks -- setPaneRefreshHook/setRemoteApplyHook --
+// were removed when Tweakpane was: this version counter already covered
+// every one of their call sites.)
 // ============================================================
 let version = 0;
 const listeners = new Set();
 export function bump() { version++; listeners.forEach((l) => l()); }
 export function subscribe(cb) { listeners.add(cb); return () => listeners.delete(cb); }
 export function getVersion() { return version; }
-
-// Optional hooks the phone/Tweakpane entry (main.js) registers so the exact
-// same call sites that used to say `if (pane) pane.refresh();` or
-// `if (pane) buildPane();` keep doing so -- default no-ops so the React
-// desktop entry (which has no `pane`) pays nothing and changes nothing.
-let paneRefreshHook = () => {};
-let remoteApplyHook = () => {};
-export function setPaneRefreshHook(fn) { paneRefreshHook = fn; }
-export function setRemoteApplyHook(fn) { remoteApplyHook = fn; }
 
 // ============================================================
 // Resize / postFX-GL lifecycle (verbatim from old main.js)
@@ -225,7 +219,6 @@ export function morphTo(target, durationMs, useEase) {
       if (s.core && e.core) r.core = lerpColor(s.core, e.core, t);
     });
     render();
-    paneRefreshHook();
     if (raw < 1) morphRaf = requestAnimationFrame(tick);
   }
   morphRaf = requestAnimationFrame(tick);
@@ -245,7 +238,6 @@ export function shuffleSelected() {
     r.ink = randomColor();
   });
   render();
-  paneRefreshHook();
 }
 
 // ---- Keyframe demo (RAF loop #3) ----
@@ -264,7 +256,6 @@ function kfTick(now) {
   const v = lerp(state.kf.a, state.kf.b, t);
   state.multiSelect.forEach((idx) => { state.active.ribbons[idx][state.kf.param] = v; });
   render();
-  paneRefreshHook();
   if (state.kf.playing) kfRaf = requestAnimationFrame(kfTick);
 }
 export function kfPlay() {
@@ -316,7 +307,6 @@ function audioTick() {
       state.active.ribbons[idx][state.audioMod.param] = Math.max(0, base + avg * state.audioMod.amount);
     });
     render();
-    paneRefreshHook();
   }
   requestAnimationFrame(audioTick);
 }
@@ -349,7 +339,6 @@ function camTick() {
         state.active.ribbons[idx][state.camMod.param] = Math.max(0, base + avg * state.camMod.amount);
       });
       render();
-      paneRefreshHook();
     }
   }
   requestAnimationFrame(camTick);
@@ -382,7 +371,7 @@ function lfoTick(now) {
       });
     }
   });
-  if (any) { render(); paneRefreshHook(); }
+  if (any) render();
   requestAnimationFrame(lfoTick);
 }
 requestAnimationFrame(lfoTick);
@@ -963,7 +952,6 @@ function applyRemoteState(payload) {
   if (payload.adj) Object.assign(state.adj, payload.adj);
   if (payload.fx) Object.assign(state.fx, payload.fx);
   render();
-  remoteApplyHook();
 }
 export function connectWS() {
   const host = isController ? location.hostname : '127.0.0.1';

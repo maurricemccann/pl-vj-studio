@@ -109,7 +109,12 @@ pub async fn start() {
 
     let app = Router::new()
         .route("/", get(|| async { html(include_str!("../../src/index.html")) }))
-        .route("/main.js", get(|| async { js(include_str!("../../src/main.js")) }))
+        // SPEC — PL THIRD EYE VJ STUDIO SETTINGS PANEL REDESIGN, Phase C AT4
+        // (S241·b6e2): the controller's own React entry, replacing main.js/
+        // Tweakpane (both deleted in this same commit).
+        .route("/controller/main.js", get(|| async { js(include_str!("../../src/controller/main.js")) }))
+        .route("/vendor/react.js", get(|| async { js(include_str!("../../src/vendor/react.js")) }))
+        .route("/vendor/react-dom.js", get(|| async { js(include_str!("../../src/vendor/react-dom.js")) }))
         .route("/engine.js", get(|| async { js(include_str!("../../src/engine.js")) }))
         .route("/pieces.js", get(|| async { js(include_str!("../../src/pieces.js")) }))
         // Bare-hands ribbon control (S218 spec, built 2026-08-31). A standalone
@@ -152,10 +157,6 @@ pub async fn start() {
             get(|| async { js(include_str!("../../src/core/interactions.js")) }),
         )
         .route("/styles.css", get(|| async { css(include_str!("../../src/styles.css")) }))
-        .route(
-            "/vendor/tweakpane.js",
-            get(|| async { js(include_str!("../../src/vendor/tweakpane.js")) }),
-        )
         .route(
             "/manifest.webmanifest",
             get(|| async { manifest(include_str!("../../src/manifest.webmanifest")) }),
