@@ -24,7 +24,11 @@ export { PIECES, RIBBON_MATERIALS };
 // in the real desktop webview, so a phone opening the plain server URL (with
 // or without ?controller) is always false here. Recomputed independently in
 // this module (not passed in) since each entry gets its own copy of core.
-export const isController = !window.__TAURI__ || new URLSearchParams(location.search).has('controller');
+// ?desktop=1 is a dev-only escape hatch for browser-based acceptance testing
+// (Chrome automation can't inject window.__TAURI__ before this module loads) --
+// never set by the real Tauri webview or the phone controller flow.
+export const isController = (!window.__TAURI__ || new URLSearchParams(location.search).has('controller'))
+  && !new URLSearchParams(location.search).has('desktop');
 
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
