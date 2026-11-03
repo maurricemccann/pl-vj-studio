@@ -1,8 +1,11 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-psyapp="third-eye">
 <head>
   <meta charset="UTF-8" />
   <title>PL Third Eye VJ Studio</title>
+  <!-- S342 his ruling: every native app gets the PL Paint treatment: psyglass + the shared Settings panel, synced from the Design Kit into src/ -->
+  <script src="/settings.js"></script>
+  <link rel="stylesheet" href="/glass.css" />
   <link rel="stylesheet" href="/src/styles.css" />
   <link rel="stylesheet" href="/src/panel/panel.css" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
@@ -51,5 +54,13 @@
     </div>
   </div>
   <script type="module" src="/src/panel/main.jsx"></script>
+  <div id="pl-corner" style="position:fixed;right:12px;bottom:12px;z-index:40;display:flex;gap:6px">
+    <a href="/handbook/index.html" target="_blank" rel="noreferrer" class="psybutton" title="The handbook (F1)" style="padding:4px 10px;font-size:11px">Handbook</a>
+    <button id="pl-settings-btn" type="button" class="psybutton" title="Settings" style="padding:4px 10px;font-size:11px">Settings</button>
+  </div>
+  <div id="pl-settings-panel" class="psyglass psyglass--sheet" hidden style="position:fixed;right:12px;bottom:48px;z-index:40;width:360px;max-height:70vh;overflow:auto;padding:12px"><div id="psysettings"></div></div>
+  <script src="/glass.js"></script>
+  <script>if (window.psyglass) psyglass.auto({"#sidebar":"psyglass psyglass--bar","#panel, .module, .pad-block":"psyglass psyglass--card",".pad":"psycapsule","button":"psybutton","select":"psysegment","input[type=range]":"psyslide"});</script>
+  <script>(function(){var p=document.getElementById('pl-settings-panel'),b=document.getElementById('pl-settings-btn');b.onclick=function(){p.hidden=!p.hidden;if(!p.hidden&&window.psysettings&&!document.getElementById('psysettings').childElementCount)psysettings.mount(document.getElementById('psysettings'),{handFont:'/fonts/PL-Hand-V2.ttf',notifications:[]});};addEventListener('keydown',function(e){if(e.key==='F1'){e.preventDefault();window.open('/handbook/index.html','_blank');}});})();</script>
 </body>
 </html>
